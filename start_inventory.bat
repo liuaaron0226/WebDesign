@@ -23,6 +23,10 @@ python -m pip install -r requirements.txt --quiet
 echo [2/3] 本機內網 IP 如下(同事請用其中 192.168.x.x 或 10.x.x.x 開頭的位址加 :5000):
 ipconfig | findstr /i "IPv4"
 
+echo 資料保存位置(請定期備份這幾項):
+echo   資料庫 inventory.db、照片 inventory_images\、自動備份 backups\
+echo.
+
 echo [3/3] 啟動庫存管理系統(關閉此視窗即停止服務)...
 echo 若同事連不上,請到「Windows 安全性 - 防火牆」允許 Python 的連入連線(連接埠 5000)。
 python inventory_app.py

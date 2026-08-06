@@ -7,14 +7,19 @@
 
 import csv
 import io
+import math
 import os
 import secrets
+import shutil
 import sqlite3
-from datetime import datetime, timezone
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import (Flask, Response, g, redirect, render_template_string,
                    request, send_from_directory, session, url_for)
+from markupsafe import Markup, escape
 from werkzeug.security import check_password_hash, generate_password_hash
 
 # Pillow 供以圖搜圖使用;缺席時 app 仍可啟動,僅該功能停用
@@ -25,35 +30,90 @@ except ImportError:
     HAS_PIL = False
 
 app = Flask(__name__)
-# 正式環境務必在 Render 環境變數設定 SECRET_KEY,否則 session 可被偽造
-app.secret_key = os.environ.get("SECRET_KEY", "dev-inventory-secret-change-me")
 
 # 資料庫路徑可用環境變數覆蓋,驗收測試用 /tmp 下的乾淨 DB
 DB_PATH = os.environ.get("INVENTORY_DB", "inventory.db")
+DATA_DIR = os.path.dirname(os.path.abspath(DB_PATH))
 
 # 物料照片存放目錄(gitignored),同樣可用環境變數覆蓋
 IMAGE_DIR = os.path.abspath(os.environ.get("INVENTORY_IMAGES", "inventory_images"))
 
+# 備份目錄:本機固定備到 DB 旁的 backups/;另可設 BACKUP_DIR 同步複製到共用槽/NAS
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+EXTRA_BACKUP_DIR = os.environ.get("BACKUP_DIR", "").strip()
+BACKUP_KEEP = 14              # 本機保留份數
+BACKUP_INTERVAL_SEC = 24 * 3600
+
 ALLOWED_IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
+
+# 上傳大小上限 10MB:照片與 CSV 皆足夠,可擋下把記憶體吃滿的超大檔
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+# 數值合理上限:避免超大整數在寫入 SQLite 時丟 OverflowError 造成 500
+MAX_QUANTITY = 1_000_000_000
+
+# 顯示時區:資料庫一律存 UTC(正確做法),顯示時轉台灣時間 UTC+8
+LOCAL_TZ = timezone(timedelta(hours=8))
 
 # 內網白名單:設定 ALLOWED_IPS(逗號分隔)後,只有名單內來源可存取。
 # 未設定 = 功能關閉(內網部署靠網路隔離本身,不需要此機制)。
 ALLOWED_IPS = {ip.strip() for ip in os.environ.get("ALLOWED_IPS", "").split(",") if ip.strip()}
+# 只有確實部署在可信反向代理後方(如 Render)才可開啟;直連部署務必維持關閉,
+# 否則任何人都能自行送出 X-Forwarded-For 標頭假冒白名單 IP。
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_secret_key():
+    # 絕不使用可預測的硬編碼金鑰(否則任何人都能離線偽造 session)。
+    # 優先讀環境變數;否則在資料目錄產生一把持久隨機金鑰,達成零設定又不可預測。
+    env_key = os.environ.get("SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+    key_path = os.path.join(DATA_DIR, "secret_key.txt")
+    try:
+        with open(key_path, "r", encoding="ascii") as fh:
+            key = fh.read().strip()
+            if key:
+                return key
+    except OSError:
+        pass
+    key = secrets.token_hex(32)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(key_path, "w", encoding="ascii") as fh:
+            fh.write(key)
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass  # 無法寫檔時仍以本次隨機金鑰運行(重啟後 session 失效,但不可偽造)
+    return key
+
+
+app.secret_key = load_secret_key()
 
 
 @app.before_request
 def restrict_to_allowed_ips():
-    # 來源 IP 取 X-Forwarded-For 第一值(Render 等反向代理會正確設定);
-    # 直連部署時此標頭可被偽造,故本機制僅設計給「雲端 + 公司固定 IP」情境。
+    # 來源 IP 預設取實際連線位址;唯有明確設定 TRUST_PROXY 才採信
+    # X-Forwarded-For(且取最後一段,即最靠近本機的代理所填入的值)。
     if not ALLOWED_IPS:
         return None
-    xff = request.headers.get("X-Forwarded-For", "")
-    client_ip = xff.split(",")[0].strip() if xff else (request.remote_addr or "")
+    client_ip = request.remote_addr or ""
+    if TRUST_PROXY:
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            client_ip = xff.split(",")[-1].strip()
     if client_ip not in ALLOWED_IPS:
         return Response(
             "<h1>403 禁止存取</h1><p>此系統僅限公司內部網路使用。</p>",
             status=403, mimetype="text/html")
     return None
+
+
+@app.errorhandler(413)
+def handle_too_large(err):
+    return Response(
+        "<h1>413 檔案過大</h1><p>上傳檔案不可超過 10MB,請縮小檔案後再試。</p>",
+        status=413, mimetype="text/html")
 
 
 # ---------------------------------------------------------------------------
@@ -63,9 +123,13 @@ def restrict_to_allowed_ips():
 def get_db():
     # 每個 request 一條連線,存在 flask.g,teardown 時關閉
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=15)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
+        # WAL:讀取不再阻塞寫入。修正前「有人開歷史頁時他人入庫噴 500 掉資料」
+        # 的並發問題;busy_timeout 讓寫入排隊而非立刻報錯。
+        g.db.execute("PRAGMA journal_mode = WAL")
+        g.db.execute("PRAGMA busy_timeout = 15000")
     return g.db
 
 
@@ -78,7 +142,8 @@ def close_db(exc):
 
 def init_db():
     # CREATE TABLE IF NOT EXISTS 為冪等操作,啟動時自動建表
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA journal_mode = WAL")  # WAL 是 DB 持久屬性,設一次即可
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,6 +224,20 @@ def init_db():
             quantity       INTEGER NOT NULL CHECK (quantity > 0)
         );
         CREATE INDEX IF NOT EXISTS idx_lc_tx ON lot_consumptions(transaction_id);
+        -- 異動歷史每筆 in 都要回查建立的批號,無此索引在兩萬筆時會全表掃描(實測 6 秒)
+        CREATE INDEX IF NOT EXISTS idx_lots_tx ON lots(transaction_id);
+        -- 稽核軌跡:誰在什麼時候改了什麼(建檔維護與管理操作皆留痕)
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER REFERENCES users(id),
+            username    TEXT DEFAULT '',
+            action      TEXT NOT NULL,
+            target_type TEXT DEFAULT '',
+            target_id   TEXT DEFAULT '',
+            detail      TEXT DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
     """)
     conn.commit()
     conn.close()
@@ -166,10 +245,66 @@ def init_db():
     reconcile_lots()
 
 
+def audit(action, target_type="", target_id="", detail=""):
+    # 寫入稽核軌跡;必須在呼叫端的交易內(由呼叫端 commit),失敗不可影響主流程
+    try:
+        get_db().execute("""
+            INSERT INTO audit_log (user_id, username, action, target_type, target_id, detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (session.get("user_id"), session.get("username", ""), action,
+              target_type, str(target_id), detail, now_str()))
+    except Exception:
+        pass
+
+
+def backup_db():
+    # 用 sqlite3 的 backup API 取得一致性快照(WAL 模式下直接複製檔案並不安全)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    name = f"inventory_{stamp}.db"
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        target = os.path.join(BACKUP_DIR, name)
+        src = sqlite3.connect(DB_PATH, timeout=15)
+        dst = sqlite3.connect(target)
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+        # 只保留最近 BACKUP_KEEP 份,避免磁碟被無限佔用
+        backups = sorted(f for f in os.listdir(BACKUP_DIR)
+                         if f.startswith("inventory_") and f.endswith(".db"))
+        for old in backups[:-BACKUP_KEEP]:
+            try:
+                os.remove(os.path.join(BACKUP_DIR, old))
+            except OSError:
+                pass
+        # 另備一份到共用槽/NAS(設了 BACKUP_DIR 才做);失敗不影響本機備份
+        if EXTRA_BACKUP_DIR:
+            try:
+                os.makedirs(EXTRA_BACKUP_DIR, exist_ok=True)
+                shutil.copy2(target, os.path.join(EXTRA_BACKUP_DIR, name))
+            except OSError as exc:
+                print(f"[備份] 共用槽備份失敗({EXTRA_BACKUP_DIR}):{exc}")
+        return target
+    except Exception as exc:
+        print(f"[備份] 失敗:{exc}")
+        return None
+
+
+def start_backup_thread():
+    # 啟動時先備一份,之後每 24 小時一次(daemon thread,關閉服務即結束)
+    def loop():
+        while True:
+            time.sleep(BACKUP_INTERVAL_SEC)
+            backup_db()
+    backup_db()
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def reconcile_lots():
     # 期初自動補批:舊資料庫升級時,若商品現時庫存大於批次剩餘總和,
     # 以「期初批」補齊缺口,確保批次帳與總帳恆一致(批次剩餘總和 = quantity)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT p.id, p.quantity,
@@ -208,8 +343,48 @@ def hamming_distance(h1, h2):
 
 
 def now_str():
-    # 統一使用 UTC 時間字串,報表日期篩選直接用字串比較
+    # 資料庫一律存 UTC 字串(跨時區正確、可直接字串比較);顯示時才轉台灣時間
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_utc(s):
+    # 把 DB 內的 UTC 字串轉成有時區資訊的 datetime
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def fmt_local(s):
+    # UTC 字串 → 台灣時間顯示字串(給頁面與 CSV 用)
+    if not s:
+        return ""
+    try:
+        return parse_utc(s).astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return s
+
+
+def local_date_to_utc_range(start_date, end_date):
+    # 使用者輸入的是台灣日期,DB 存 UTC:把 [start 00:00, end 23:59:59] 台灣時間
+    # 換算成對應的 UTC 字串區間,日期篩選才不會整體偏移 8 小時
+    start_utc = end_utc = None
+    try:
+        if start_date:
+            local_start = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=LOCAL_TZ)
+            start_utc = local_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        if end_date:
+            local_end = (datetime.strptime(end_date, "%Y-%m-%d")
+                         .replace(hour=23, minute=59, second=59, tzinfo=LOCAL_TZ))
+            end_utc = local_end.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None, None
+    return start_utc, end_utc
+
+
+def safe_int(value, default=None):
+    # 取代「先 isdigit() 再 int()」:isdigit 對上標²等 Unicode 數字為真但 int() 會爆
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return default
 
 
 def fmt_num(value):
@@ -226,6 +401,24 @@ def fmt_money(value):
 # ---------------------------------------------------------------------------
 # 登入保護
 # ---------------------------------------------------------------------------
+
+def forbidden(msg="您沒有執行此操作的權限,請洽管理員。"):
+    return Response(f"<h1>403 權限不足</h1><p>{msg}</p>"
+                    f"<p><a href='/'>返回庫存總覽</a></p>",
+                    status=403, mimetype="text/html")
+
+
+def admin_required(view):
+    # 破壞性操作(刪除、整批匯入、帳號管理)限管理員
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("user_id"):
+            return redirect(url_for("login"))
+        if not session.get("is_admin"):
+            return forbidden()
+        return view(*args, **kwargs)
+    return wrapped
+
 
 def login_required(view):
     @wraps(view)
@@ -278,6 +471,8 @@ LAYOUT = """
                   border-radius: 10px; margin-bottom: 14px; }
         .banner a { display: inline-block; padding: 4px 0; }
         .note { color: #64748b; font-size: 13px; }
+        .pager { margin-top: 14px; font-size: 14px; }
+        .pager .page-no { color: #64748b; }
         form.inline { display: inline; }
         label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; color: #334155; }
         input[type=text], input[type=password], input[type=number], input[type=date], select {
@@ -381,8 +576,12 @@ LAYOUT = """
         <a {% if request.path == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">報表</a>
         <a {% if request.path == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
         <a {% if request.path == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖搜圖</a>
+        {% if session.get('is_admin') %}
         <a {% if request.path == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
-        <span class="user-info">使用者:{{ session.get('username') }}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
+        <a {% if request.path == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核軌跡</a>
+        <a {% if request.path.startswith('/users') %}class="active" {% endif %}href="{{ url_for('users_page') }}">帳號管理</a>
+        {% endif %}
+        <span class="user-info">使用者:{{ session.get('username') }}{% if session.get('is_admin') %}(管理員){% endif %}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
     </nav>
     {% endif %}
     <div class="container">
@@ -396,6 +595,20 @@ LAYOUT = """
 """
 
 
+def build_pager(endpoint, page, has_next, **params):
+    # 純連結分頁(零 JS);保留目前的搜尋/篩選參數。
+    # 回傳 Markup 讓 Jinja2 直接輸出 HTML(否則會被自動跳脫成字面文字)
+    parts = []
+    if page > 1:
+        prev_url = escape(url_for(endpoint, page=page - 1, **params))
+        parts.append(f'<a class="plain" href="{prev_url}">← 上一頁</a>')
+    parts.append(f'<span class="page-no">第 {page} 頁</span>')
+    if has_next:
+        next_url = escape(url_for(endpoint, page=page + 1, **params))
+        parts.append(f'<a class="plain" href="{next_url}">下一頁 →</a>')
+    return Markup('<p class="pager">' + '　'.join(parts) + '</p>')
+
+
 def render_page(body, **ctx):
     ctx.setdefault("error", None)
     ctx.setdefault("msg", None)
@@ -405,14 +618,20 @@ def render_page(body, **ctx):
 
 PAGE_REGISTER = """
 <div class="auth-box">
-<h1>註冊帳號</h1>
+{% if closed %}
+<h1>不開放自助註冊</h1>
+<p>本系統已完成初始設定。為了資料安全,新帳號一律由管理員建立。</p>
+<p><a class="plain" href="{{ url_for('login') }}">前往登入</a></p>
+{% else %}
+<h1>建立管理員帳號</h1>
+<p class="note">這是系統的第一個帳號,將自動成為管理員(可管理帳號、刪除資料、CSV 匯入)。建立後系統即關閉自助註冊。</p>
 <form method="post">
     <label>帳號</label><input type="text" name="username" value="{{ username or '' }}">
-    <label>密碼</label><input type="password" name="password">
-    <input type="submit" value="註冊">
+    <label>密碼(至少 8 碼)</label><input type="password" name="password">
+    <input type="submit" value="建立管理員帳號">
 </form>
 <p>已有帳號?<a class="plain" href="{{ url_for('login') }}">前往登入</a></p>
-<p class="note">第一位註冊的使用者將自動成為管理員。</p>
+{% endif %}
 </div>
 """
 
@@ -451,7 +670,9 @@ PAGE_INDEX = """
     <a href="{{ url_for('stock_in') }}"><span class="qa-icon qa-in">⬇</span>入庫登記</a>
     <a href="{{ url_for('stock_out') }}"><span class="qa-icon qa-out">⬆</span>出庫登記</a>
     <a href="{{ url_for('image_search') }}"><span class="qa-icon">📷</span>以圖搜圖</a>
+    {% if session.get('is_admin') %}
     <a href="{{ url_for('csv_import') }}"><span class="qa-icon">📄</span>CSV 匯入</a>
+    {% endif %}
     <a href="{{ url_for('product_new') }}"><span class="qa-icon">➕</span>新增商品</a>
 </div>
 {% if products %}
@@ -471,14 +692,17 @@ PAGE_INDEX = """
         <td data-label="操作">
             <a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">詳細</a>
             <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯</a>
+            {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('product_delete', pid=p['id']) }}"
                   onsubmit="return confirm('確定刪除商品「{{ p['name'] }}」?');">
                 <button class="small-btn" type="submit">刪除</button>
             </form>
+            {% endif %}
         </td>
     </tr>
     {% endfor %}
 </table>
+{{ pager }}
 {% elif q or category %}
 <p>查無商品:找不到符合條件的資料。可以試試改用其他公司的別名料號搜尋,或確認關鍵字是否正確。</p>
 {% else %}
@@ -578,10 +802,10 @@ PAGE_HISTORY = """
 </form>
 {% if rows %}
 <table>
-    <tr><th>時間(UTC)</th><th>類型</th><th>商品</th><th>SKU</th><th>數量</th><th>批次</th><th>備註</th><th>操作人員</th></tr>
+    <tr><th>時間(台灣)</th><th>類型</th><th>商品</th><th>SKU</th><th>數量</th><th>批次</th><th>備註</th><th>操作人員</th></tr>
     {% for r in rows %}
     <tr>
-        <td>{{ r['created_at'] }}</td>
+        <td>{{ r['created_local'] }}</td>
         <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
         <td>{{ r['product_name'] }}</td>
         <td>{{ r['sku'] }}</td>
@@ -592,6 +816,7 @@ PAGE_HISTORY = """
     </tr>
     {% endfor %}
 </table>
+{{ pager }}
 {% else %}
 <p>沒有符合條件的異動紀錄。</p>
 {% endif %}
@@ -612,10 +837,12 @@ PAGE_SUPPLIERS = """
         <td>{{ s['product_count'] }}</td>
         <td>
             <a class="plain" href="{{ url_for('supplier_edit', sid=s['id']) }}">編輯</a>
+            {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('supplier_delete', sid=s['id']) }}"
                   onsubmit="return confirm('確定刪除供應商「{{ s['name'] }}」?其商品的供應商欄位將被清空。');">
                 <button class="small-btn" type="submit">刪除</button>
             </form>
+            {% endif %}
         </td>
     </tr>
     {% endfor %}
@@ -735,10 +962,12 @@ PAGE_PRODUCT_DETAIL = """
         {% for img in images %}
         <div class="photo-item">
             <img src="{{ url_for('serve_image', filename=img['filename']) }}" alt="{{ p['name'] }}">
+            {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('image_delete', pid=p['id'], img_id=img['id']) }}"
                   onsubmit="return confirm('確定刪除這張照片?');">
                 <button class="small-btn" type="submit">刪除</button>
             </form>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -762,10 +991,12 @@ PAGE_PRODUCT_DETAIL = """
             <td>{{ a['alias_sku'] }}</td>
             <td>{{ a['note'] }}</td>
             <td>
+                {% if session.get('is_admin') %}
                 <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}"
                       onsubmit="return confirm('確定刪除別名「{{ a['company'] }}:{{ a['alias_sku'] }}」?');">
                     <button class="small-btn" type="submit">刪除</button>
                 </form>
+                {% else %}—{% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -785,11 +1016,11 @@ PAGE_PRODUCT_DETAIL = """
     <h2>批次庫存(FIFO 先進先出)</h2>
     {% if lots %}
     <table class="cards">
-        <tr><th>批號</th><th>入庫時間(UTC)</th><th>庫齡(天)</th><th>剩餘 / 原始</th><th>成本單價</th><th>備註</th></tr>
+        <tr><th>批號</th><th>入庫時間(台灣)</th><th>庫齡(天)</th><th>剩餘 / 原始</th><th>成本單價</th><th>備註</th></tr>
         {% for l in lots %}
         <tr{% if l['qty_remaining'] == 0 %} class="lot-empty"{% endif %}>
             <td data-label="批號">{{ l['lot_no'] }}</td>
-            <td data-label="入庫時間">{{ l['received_at'] }}</td>
+            <td data-label="入庫時間">{{ l['received_local'] }}</td>
             <td data-label="庫齡(天)" class="num">{{ l['age_days'] }}</td>
             <td data-label="剩餘/原始" class="num">{{ l['qty_remaining'] }} / {{ l['qty_received'] }}</td>
             <td data-label="成本單價" class="num">{{ l['cost_str'] }}</td>
@@ -807,10 +1038,10 @@ PAGE_PRODUCT_DETAIL = """
     <h2>近期異動</h2>
     {% if recent_tx %}
     <table>
-        <tr><th>時間(UTC)</th><th>類型</th><th>數量</th><th>備註</th><th>操作人員</th></tr>
+        <tr><th>時間(台灣)</th><th>類型</th><th>數量</th><th>備註</th><th>操作人員</th></tr>
         {% for r in recent_tx %}
         <tr>
-            <td>{{ r['created_at'] }}</td>
+            <td>{{ r['created_local'] }}</td>
             <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
             <td>{{ r['quantity'] }}</td>
             <td>{{ r['note'] }}</td>
@@ -822,6 +1053,78 @@ PAGE_PRODUCT_DETAIL = """
     <p>尚無異動紀錄。</p>
     {% endif %}
 </div>
+"""
+
+PAGE_USERS = """
+<h1>帳號管理</h1>
+<table class="cards">
+    <tr><th>帳號</th><th>角色</th><th>建立時間</th><th>操作</th></tr>
+    {% for u in users %}
+    <tr>
+        <td data-label="帳號">{{ u['username'] }}</td>
+        <td data-label="角色">{% if u['is_admin'] %}管理員{% else %}一般使用者{% endif %}</td>
+        <td data-label="建立時間">{{ u['created_local'] }}</td>
+        <td data-label="操作">
+            <form class="inline" method="post" action="{{ url_for('user_delete', uid=u['id']) }}"
+                  onsubmit="return confirm('確定刪除帳號「{{ u['username'] }}」?');">
+                <button class="small-btn" type="submit">刪除</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+
+<div class="detail-section">
+    <h2>新增帳號</h2>
+    <form method="post" action="{{ url_for('user_new') }}">
+        <label>帳號</label><input type="text" name="username">
+        <label>密碼(至少 8 碼)</label><input type="password" name="password">
+        <label><input type="checkbox" name="is_admin" value="1"> 設為管理員(可刪除資料、CSV 匯入、管理帳號)</label>
+        <input type="submit" value="建立帳號">
+    </form>
+</div>
+
+<div class="detail-section">
+    <h2>重設密碼</h2>
+    <form method="post" action="{{ url_for('user_password') }}">
+        <label>選擇帳號</label>
+        <select name="user_id">
+            {% for u in users %}
+            <option value="{{ u['id'] }}">{{ u['username'] }}</option>
+            {% endfor %}
+        </select>
+        <label>新密碼(至少 8 碼)</label><input type="password" name="password">
+        <input type="submit" value="重設密碼">
+    </form>
+    <p class="note">同事忘記密碼時由管理員在此重設。系統不開放自助註冊,新同事的帳號請用上方表單建立。</p>
+</div>
+"""
+
+PAGE_AUDIT = """
+<h1>稽核軌跡</h1>
+<p class="note">記錄商品、供應商、別名、照片的建檔維護,以及 CSV 匯入與帳號管理等操作,供事後追查。</p>
+<form method="get" class="filters">
+    <input type="text" name="q" placeholder="搜尋操作者或內容" value="{{ q }}">
+    <input type="submit" value="搜尋">
+    <a class="plain" href="{{ url_for('audit_page') }}">清除</a>
+</form>
+{% if rows %}
+<table>
+    <tr><th>時間(台灣)</th><th>操作者</th><th>動作</th><th>對象</th><th>內容</th></tr>
+    {% for r in rows %}
+    <tr>
+        <td>{{ r['created_local'] }}</td>
+        <td>{{ r['username'] }}</td>
+        <td>{{ r['action'] }}</td>
+        <td>{{ r['target_type'] }}{% if r['target_id'] %} #{{ r['target_id'] }}{% endif %}</td>
+        <td>{{ r['detail'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{{ pager }}
+{% else %}
+<p>目前沒有稽核紀錄。</p>
+{% endif %}
 """
 
 PAGE_IMAGE_SEARCH = """
@@ -892,32 +1195,58 @@ PAGE_IMPORT = """
 
 
 # ---------------------------------------------------------------------------
-# 帳號:註冊 / 登入 / 登出
+# 帳號:註冊(僅首位)/ 登入 / 登出 / 帳號管理
 # ---------------------------------------------------------------------------
+
+MIN_PASSWORD_LEN = 8
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_SEC = 300
+_login_fails = {}  # username -> (失敗次數, 最後一次失敗時間);程序內記憶,重啟即清空
+
+
+def check_password_policy(password):
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"密碼至少 {MIN_PASSWORD_LEN} 碼,請重新設定"
+    return None
+
+
+def user_count():
+    return get_db().execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+
+
+def create_user(username, password, is_admin):
+    # 共用建帳邏輯(首位註冊與管理員新增帳號都走這裡)
+    get_db().execute(
+        "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
+        (username, generate_password_hash(password), 1 if is_admin else 0, now_str()),
+    )
+
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    # 只開放給「系統第一位使用者」建立管理員帳號;之後帳號一律由管理員在 /users 新增,
+    # 避免任何連得到內網的人自行建帳進入系統。
     error = None
     username = ""
+    if user_count() > 0:
+        return render_page(PAGE_REGISTER, closed=True,
+                           error="系統已完成初始設定,不開放自助註冊。需要帳號請洽管理員建立。")
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         if not username or not password:
             error = "帳號與密碼不可為空"
         else:
-            db = get_db()
-            # 第一位註冊者自動成為管理員
-            first_user = db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"] == 0
-            try:
-                db.execute(
-                    "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
-                    (username, generate_password_hash(password), 1 if first_user else 0, now_str()),
-                )
-                db.commit()
-                return redirect(url_for("login"))
-            except sqlite3.IntegrityError:
-                error = "帳號已存在,請改用其他名稱"
-    return render_page(PAGE_REGISTER, error=error, username=username)
+            error = check_password_policy(password)
+            if not error:
+                db = get_db()
+                try:
+                    create_user(username, password, is_admin=True)  # 首位即管理員
+                    db.commit()
+                    return redirect(url_for("login"))
+                except sqlite3.IntegrityError:
+                    error = "帳號已存在,請改用其他名稱"
+    return render_page(PAGE_REGISTER, error=error, username=username, closed=False)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -927,16 +1256,132 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        user = get_db().execute(
-            "SELECT * FROM users WHERE username = ?", (username,)
-        ).fetchone()
-        if user and check_password_hash(user["password_hash"], password):
-            session.clear()
-            session["user_id"] = user["id"]
-            session["username"] = user["username"]
-            return redirect(url_for("index"))
-        error = "帳號或密碼錯誤"
+        fails, last = _login_fails.get(username, (0, 0.0))
+        if fails >= LOGIN_MAX_FAILS and (time.time() - last) < LOGIN_LOCK_SEC:
+            remain = int((LOGIN_LOCK_SEC - (time.time() - last)) / 60) + 1
+            error = f"嘗試次數過多,請於約 {remain} 分鐘後再試"
+        else:
+            if fails >= LOGIN_MAX_FAILS:
+                _login_fails.pop(username, None)  # 鎖定期已過,重新計數
+            user = get_db().execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            if user and check_password_hash(user["password_hash"], password):
+                _login_fails.pop(username, None)
+                session.clear()
+                session["user_id"] = user["id"]
+                session["username"] = user["username"]
+                session["is_admin"] = bool(user["is_admin"])  # 權限判斷依據
+                return redirect(url_for("index"))
+            prev = _login_fails.get(username, (0, 0.0))[0]
+            _login_fails[username] = (prev + 1, time.time())
+            error = "帳號或密碼錯誤"
     return render_page(PAGE_LOGIN, error=error, username=username)
+
+
+@app.route("/users")
+@admin_required
+def users_page(error=None, msg=None):
+    rows = []
+    for u in get_db().execute("SELECT * FROM users ORDER BY id").fetchall():
+        d = dict(u)
+        d["created_local"] = fmt_local(u["created_at"])
+        rows.append(d)
+    return render_page(PAGE_USERS, users=rows, error=error, msg=msg)
+
+
+@app.route("/users/new", methods=["POST"])
+@admin_required
+def user_new():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    is_admin = bool(request.form.get("is_admin"))
+    if not username or not password:
+        return users_page(error="帳號與密碼不可為空")
+    policy_err = check_password_policy(password)
+    if policy_err:
+        return users_page(error=policy_err)
+    db = get_db()
+    try:
+        create_user(username, password, is_admin)
+        audit("新增帳號", "帳號", username, "管理員" if is_admin else "一般使用者")
+        db.commit()
+    except sqlite3.IntegrityError:
+        return users_page(error="帳號已存在,請改用其他名稱")
+    return redirect(url_for("users_page"))
+
+
+@app.route("/users/password", methods=["POST"])
+@admin_required
+def user_password():
+    uid = safe_int(request.form.get("user_id", ""))
+    password = request.form.get("password", "")
+    if uid is None:
+        return users_page(error="請選擇要重設密碼的帳號")
+    policy_err = check_password_policy(password)
+    if policy_err:
+        return users_page(error=policy_err)
+    db = get_db()
+    row = db.execute("SELECT username FROM users WHERE id = ?", (uid,)).fetchone()
+    if row is None:
+        return users_page(error="找不到指定的帳號")
+    db.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+               (generate_password_hash(password), uid))
+    _login_fails.pop(row["username"], None)  # 重設密碼同時解除鎖定
+    audit("重設密碼", "帳號", row["username"])
+    db.commit()
+    return users_page(msg=f"已重設 {row['username']} 的密碼")
+
+
+@app.route("/users/<int:uid>/delete", methods=["POST"])
+@admin_required
+def user_delete(uid):
+    db = get_db()
+    if uid == session.get("user_id"):
+        return users_page(error="不可刪除自己的帳號")
+    row = db.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    if row is None:
+        return users_page(error="找不到指定的帳號")
+    if row["is_admin"]:
+        admins = db.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = 1").fetchone()["c"]
+        if admins <= 1:
+            return users_page(error="不可刪除最後一位管理員")
+    # 保留其異動歷史(transactions.user_id 外鍵),僅停用帳號:改名並鎖定密碼
+    has_tx = db.execute("SELECT COUNT(*) AS c FROM transactions WHERE user_id = ?",
+                        (uid,)).fetchone()["c"] > 0
+    if has_tx:
+        db.execute("UPDATE users SET username = ?, password_hash = ?, is_admin = 0 WHERE id = ?",
+                   (f"{row['username']}(已停用)", generate_password_hash(secrets.token_hex(16)), uid))
+        audit("停用帳號", "帳號", row["username"], "有異動紀錄,保留歷史故改為停用")
+    else:
+        db.execute("DELETE FROM users WHERE id = ?", (uid,))
+        audit("刪除帳號", "帳號", row["username"])
+    db.commit()
+    return redirect(url_for("users_page"))
+
+
+@app.route("/audit")
+@admin_required
+def audit_page():
+    q = request.args.get("q", "").strip()
+    page = max(1, safe_int(request.args.get("page", "1"), 1) or 1)
+    per = 200
+    sql = "SELECT * FROM audit_log WHERE 1=1"
+    params = []
+    if q:
+        sql += " AND (username LIKE ? OR action LIKE ? OR detail LIKE ? OR target_type LIKE ?)"
+        params += [f"%{q}%"] * 4
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params += [per + 1, (page - 1) * per]
+    fetched = get_db().execute(sql, params).fetchall()
+    has_next = len(fetched) > per
+    rows = []
+    for r in fetched[:per]:
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        rows.append(d)
+    return render_page(PAGE_AUDIT, rows=rows, q=q,
+                       pager=build_pager("audit_page", page, has_next, q=q))
 
 
 # 登出用 GET 是為了 curl 可測性的刻意簡化;本系統未實作 CSRF token,
@@ -952,7 +1397,7 @@ def logout():
 # 庫存總覽(首頁)與低庫存警示
 # ---------------------------------------------------------------------------
 
-def query_products(q="", category=""):
+def query_products(q="", category="", limit=None, offset=0):
     # 搜尋同時比對我方 SKU、名稱與各公司別名料號(跨公司料號整合的核心)
     sql = """
         SELECT p.*, s.name AS supplier_name,
@@ -971,17 +1416,27 @@ def query_products(q="", category=""):
         sql += " AND p.category = ?"
         params.append(category)
     sql += " ORDER BY p.id"
+    if limit is not None:      # 匯出端點傳 limit=None 取得完整資料
+        sql += " LIMIT ? OFFSET ?"
+        params += [limit + 1, offset]   # 多取一筆用來判斷是否還有下一頁
     rows = [dict(r) for r in get_db().execute(sql, params).fetchall()]
     for r in rows:
         r["unit_price_str"] = fmt_money(r["unit_price"])
     return rows
 
 
+INDEX_PER_PAGE = 100
+
+
 def render_index(error=None, msg=None):
     q = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
+    page = max(1, safe_int(request.args.get("page", "1"), 1) or 1)
     db = get_db()
-    products = query_products(q, category)
+    fetched = query_products(q, category, limit=INDEX_PER_PAGE,
+                             offset=(page - 1) * INDEX_PER_PAGE)
+    has_next = len(fetched) > INDEX_PER_PAGE
+    products = fetched[:INDEX_PER_PAGE]
     categories = [r["category"] for r in db.execute(
         "SELECT DISTINCT category FROM products WHERE category != '' ORDER BY category"
     ).fetchall()]
@@ -990,6 +1445,7 @@ def render_index(error=None, msg=None):
     ).fetchone()["c"]
     return render_page(PAGE_INDEX, products=products, q=q, category=category,
                        categories=categories, low_count=low_count,
+                       pager=build_pager("index", page, has_next, q=q, category=category),
                        error=error, msg=msg)
 
 
@@ -1030,17 +1486,22 @@ def parse_product_form():
         return f, "商品名稱與 SKU 不可為空"
     try:
         f["unit_price_val"] = float(f["unit_price"])
-        if f["unit_price_val"] < 0:
+        # math.isfinite 擋掉 inf / nan:否則會污染報表金額與 ABC 分級
+        if not math.isfinite(f["unit_price_val"]) or f["unit_price_val"] < 0:
             raise ValueError
-    except ValueError:
-        return f, "單價必須為非負數字"
+        if f["unit_price_val"] > MAX_QUANTITY:
+            return f, "單價過大,請確認輸入"
+    except (ValueError, TypeError, OverflowError):
+        return f, "單價必須為有效的非負數字"
     try:
         f["threshold_val"] = int(f["low_stock_threshold"])
         if f["threshold_val"] < 0:
             raise ValueError
-    except ValueError:
+        if f["threshold_val"] > MAX_QUANTITY:
+            return f, "低庫存門檻過大,請確認輸入"
+    except (ValueError, TypeError, OverflowError):
         return f, "低庫存門檻必須為非負整數"
-    f["supplier_val"] = int(f["supplier_id"]) if f["supplier_id"].isdigit() else None
+    f["supplier_val"] = safe_int(f["supplier_id"])
     return f, None
 
 
@@ -1062,12 +1523,13 @@ def product_new():
         if not error:
             db = get_db()
             try:
-                db.execute("""
+                cur = db.execute("""
                     INSERT INTO products (name, sku, category, unit, unit_price,
                                           low_stock_threshold, supplier_id, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (f["name"], f["sku"], f["category"], f["unit"], f["unit_price_val"],
                       f["threshold_val"], f["supplier_val"], now_str()))
+                audit("新增商品", "商品", cur.lastrowid, f"{f['sku']} {f['name']}")
                 db.commit()
                 return redirect(url_for("index"))
             except sqlite3.IntegrityError:
@@ -1094,6 +1556,8 @@ def product_edit(pid):
                     WHERE id=?
                 """, (f["name"], f["sku"], f["category"], f["unit"], f["unit_price_val"],
                       f["threshold_val"], f["supplier_val"], pid))
+                audit("編輯商品", "商品", pid,
+                      f"{f['sku']} {f['name']} 單價={f['unit_price_val']} 門檻={f['threshold_val']}")
                 db.commit()
                 return redirect(url_for("index"))
             except sqlite3.IntegrityError:
@@ -1108,7 +1572,7 @@ def product_edit(pid):
 
 
 @app.route("/products/<int:pid>/delete", methods=["POST"])
-@login_required
+@admin_required
 def product_delete(pid):
     db = get_db()
     has_tx = db.execute(
@@ -1117,7 +1581,18 @@ def product_delete(pid):
     if has_tx:
         # 有異動紀錄的商品不可刪除,以保留完整歷史
         return render_index(error="此商品已有異動紀錄,無法刪除")
+    prow = db.execute("SELECT name, sku FROM products WHERE id = ?", (pid,)).fetchone()
+    # 先刪實體照片檔(DB 列由 FK CASCADE 處理,但檔案系統不會自動清)
+    for img in db.execute("SELECT filename FROM product_images WHERE product_id = ?", (pid,)).fetchall():
+        path = os.path.join(IMAGE_DIR, img["filename"])
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
     db.execute("DELETE FROM products WHERE id = ?", (pid,))
+    if prow:
+        audit("刪除商品", "商品", pid, f"{prow['sku']} {prow['name']}")
     db.commit()
     return redirect(url_for("index"))
 
@@ -1141,18 +1616,22 @@ def render_product_detail(pid, error=None, msg=None):
         "SELECT * FROM product_images WHERE product_id = ? ORDER BY id", (pid,)).fetchall()
     aliases = db.execute(
         "SELECT * FROM part_aliases WHERE product_id = ? ORDER BY company, alias_sku", (pid,)).fetchall()
-    recent_tx = db.execute("""
-        SELECT t.*, u.username FROM transactions t JOIN users u ON t.user_id = u.id
-        WHERE t.product_id = ? ORDER BY t.id DESC LIMIT 10
-    """, (pid,)).fetchall()
+    recent_tx = []
+    for r in db.execute("""
+            SELECT t.*, u.username FROM transactions t JOIN users u ON t.user_id = u.id
+            WHERE t.product_id = ? ORDER BY t.id DESC LIMIT 10
+        """, (pid,)).fetchall():
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        recent_tx.append(d)
     # 批次庫存(FIFO 順序)+ 庫齡天數
     now_utc = datetime.now(timezone.utc)
     lots = []
     for l in db.execute(
             "SELECT * FROM lots WHERE product_id = ? ORDER BY received_at, id", (pid,)).fetchall():
         d = dict(l)
-        received = datetime.strptime(l["received_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        d["age_days"] = (now_utc - received).days
+        d["age_days"] = (now_utc - parse_utc(l["received_at"])).days
+        d["received_local"] = fmt_local(l["received_at"])
         d["cost_str"] = fmt_money(l["unit_cost"]) if l["unit_cost"] is not None else "—"
         lots.append(d)
     return render_page(PAGE_PRODUCT_DETAIL, p=p, images=images, aliases=aliases,
@@ -1192,12 +1671,13 @@ def image_upload(pid):
         INSERT INTO product_images (product_id, filename, original_name, phash, created_at)
         VALUES (?, ?, ?, ?, ?)
     """, (pid, fname, file.filename, phash, now_str()))
+    audit("上傳照片", "商品", pid, file.filename)
     db.commit()
     return redirect(url_for("product_detail", pid=pid))
 
 
 @app.route("/products/<int:pid>/images/<int:img_id>/delete", methods=["POST"])
-@login_required
+@admin_required
 def image_delete(pid, img_id):
     db = get_db()
     row = db.execute(
@@ -1207,6 +1687,7 @@ def image_delete(pid, img_id):
         if os.path.exists(path):
             os.remove(path)
         db.execute("DELETE FROM product_images WHERE id = ?", (img_id,))
+        audit("刪除照片", "商品", pid, row["filename"])
         db.commit()
     return redirect(url_for("product_detail", pid=pid))
 
@@ -1233,6 +1714,7 @@ def alias_add(pid):
             INSERT INTO part_aliases (product_id, company, alias_sku, note, created_at)
             VALUES (?, ?, ?, ?, ?)
         """, (pid, company, alias_sku, note, now_str()))
+        audit("新增別名", "商品", pid, f"{company}:{alias_sku}")
         db.commit()
     except sqlite3.IntegrityError:
         return render_product_detail(pid, error="此公司+料號組合已存在,同一組別名不可重複登記")
@@ -1240,10 +1722,13 @@ def alias_add(pid):
 
 
 @app.route("/products/<int:pid>/aliases/<int:aid>/delete", methods=["POST"])
-@login_required
+@admin_required
 def alias_delete(pid, aid):
     db = get_db()
+    arow = db.execute("SELECT company, alias_sku FROM part_aliases WHERE id = ?", (aid,)).fetchone()
     db.execute("DELETE FROM part_aliases WHERE id = ? AND product_id = ?", (aid, pid))
+    if arow:
+        audit("刪除別名", "商品", pid, f"{arow['company']}:{arow['alias_sku']}")
     db.commit()
     return redirect(url_for("product_detail", pid=pid))
 
@@ -1266,17 +1751,22 @@ def parse_stock_form():
         "lot_no": request.form.get("lot_no", "").strip(),
         "unit_cost": request.form.get("unit_cost", "").strip(),
     }
-    if not f["quantity"].isdigit() or int(f["quantity"]) <= 0:
+    qty = safe_int(f["quantity"])
+    if qty is None or qty <= 0:
         return f, "數量必須為正整數"
-    if not f["product_id"].isdigit():
+    if qty > MAX_QUANTITY:
+        return f, f"數量過大,單筆不可超過 {MAX_QUANTITY:,},請確認輸入"
+    if safe_int(f["product_id"]) is None:
         return f, "請選擇商品"
     if f["unit_cost"]:
         try:
             f["unit_cost_val"] = float(f["unit_cost"])
-            if f["unit_cost_val"] < 0:
+            if not math.isfinite(f["unit_cost_val"]) or f["unit_cost_val"] < 0:
                 raise ValueError
-        except ValueError:
-            return f, "成本單價必須為非負數字"
+            if f["unit_cost_val"] > MAX_QUANTITY:
+                return f, "成本單價過大,請確認輸入"
+        except (ValueError, TypeError, OverflowError):
+            return f, "成本單價必須為有效的非負數字"
     else:
         f["unit_cost_val"] = None
     return f, None
@@ -1287,11 +1777,12 @@ EMPTY_STOCK_FORM = {"product_id": "", "quantity": "", "note": "", "lot_no": "", 
 
 def stock_done_msg(action):
     # 連續登記:成功後 302 回登記頁,從 done/qty 參數組出成功訊息(含最新庫存)
-    done, qty = request.args.get("done", ""), request.args.get("qty", "")
-    if not done.isdigit() or not qty.isdigit():
+    done = safe_int(request.args.get("done", ""))
+    qty = safe_int(request.args.get("qty", ""))
+    if done is None or qty is None:
         return None
     row = get_db().execute(
-        "SELECT name, quantity, unit FROM products WHERE id = ?", (int(done),)).fetchone()
+        "SELECT name, quantity, unit FROM products WHERE id = ?", (done,)).fetchone()
     if row is None:
         return None
     return f"{action}成功:{row['name']} ×{qty},目前庫存 {row['quantity']} {row['unit']},可繼續登記下一筆"
@@ -1395,6 +1886,10 @@ def stock_out():
                                               qty_remaining, note, received_at)
                             VALUES (?, ?, ?, ?, 0, '缺口調整批', ?)
                         """, (pid, tx_id, f"ADJ-{tx_id}", remaining, ts))
+                        # 正常流程不該走到這裡:留下明確告警供人工稽核,不靜默吸收
+                        audit("批次帳異常", "商品", pid,
+                              f"出庫 {qty} 時批次剩餘不足 {remaining},已建立缺口調整批 ADJ-{tx_id}")
+                        print(f"[警告] 商品 {pid} 批次帳出現缺口 {remaining},已記錄稽核軌跡")
                         db.execute("""
                             INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
                             VALUES (?, ?, ?)
@@ -1419,8 +1914,9 @@ def history_filters():
     }
 
 
-def query_transactions(filters):
+def query_transactions(filters, limit=None, offset=0):
     # lot_info:入庫顯示建立的批號;出庫顯示 FIFO 消耗明細(批號×數量)
+    # limit=None 代表不分頁(CSV 匯出用);有值時多取一筆以判斷還有沒有下一頁
     sql = """
         SELECT t.*, p.name AS product_name, p.sku, p.unit, u.username,
                CASE WHEN t.type = 'in'
@@ -1435,29 +1931,47 @@ def query_transactions(filters):
         WHERE 1=1
     """
     params = []
-    if filters["product_id"].isdigit():
+    pid = safe_int(filters["product_id"])
+    if pid is not None:
         sql += " AND t.product_id = ?"
-        params.append(int(filters["product_id"]))
+        params.append(pid)
     if filters["type"] in ("in", "out"):
         sql += " AND t.type = ?"
         params.append(filters["type"])
-    if filters["start"]:
+    # 使用者填的是台灣日期,DB 存 UTC,需換算區間才不會整體偏移 8 小時
+    start_utc, end_utc = local_date_to_utc_range(filters["start"], filters["end"])
+    if start_utc:
         sql += " AND t.created_at >= ?"
-        params.append(filters["start"])
-    if filters["end"]:
+        params.append(start_utc)
+    if end_utc:
         sql += " AND t.created_at <= ?"
-        params.append(filters["end"] + " 23:59:59")
+        params.append(end_utc)
     sql += " ORDER BY t.id DESC"
+    if limit is not None:      # 匯出端點傳 limit=None 取得完整資料
+        sql += " LIMIT ? OFFSET ?"
+        params += [limit + 1, offset]   # 多取一筆用來判斷是否還有下一頁
     return get_db().execute(sql, params).fetchall()
+
+
+HISTORY_PER_PAGE = 200
 
 
 @app.route("/history")
 @login_required
 def history():
     filters = history_filters()
-    rows = query_transactions(filters)
+    page = max(1, safe_int(request.args.get("page", "1"), 1) or 1)
+    fetched = query_transactions(filters, limit=HISTORY_PER_PAGE,
+                                 offset=(page - 1) * HISTORY_PER_PAGE)
+    has_next = len(fetched) > HISTORY_PER_PAGE
+    rows = []
+    for r in fetched[:HISTORY_PER_PAGE]:
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        rows.append(d)
     return render_page(PAGE_HISTORY, rows=rows, filters=filters,
-                       product_list=product_dropdown())
+                       product_list=product_dropdown(),
+                       pager=build_pager("history", page, has_next, **filters))
 
 
 # ---------------------------------------------------------------------------
@@ -1498,10 +2012,11 @@ def supplier_new():
         f, error = parse_supplier_form()
         if not error:
             db = get_db()
-            db.execute(
+            cur = db.execute(
                 "INSERT INTO suppliers (name, contact, phone, note, created_at) VALUES (?, ?, ?, ?, ?)",
                 (f["name"], f["contact"], f["phone"], f["note"], now_str()),
             )
+            audit("新增供應商", "供應商", cur.lastrowid, f["name"])
             db.commit()
             return redirect(url_for("suppliers"))
     return render_page(PAGE_SUPPLIER_FORM, title="新增供應商", f=f, error=error)
@@ -1522,6 +2037,7 @@ def supplier_edit(sid):
                 "UPDATE suppliers SET name=?, contact=?, phone=?, note=? WHERE id=?",
                 (f["name"], f["contact"], f["phone"], f["note"], sid),
             )
+            audit("編輯供應商", "供應商", sid, f["name"])
             db.commit()
             return redirect(url_for("suppliers"))
     else:
@@ -1531,11 +2047,14 @@ def supplier_edit(sid):
 
 
 @app.route("/suppliers/<int:sid>/delete", methods=["POST"])
-@login_required
+@admin_required
 def supplier_delete(sid):
     db = get_db()
     # FK ON DELETE SET NULL:商品的供應商欄位自動清空
+    srow = db.execute("SELECT name FROM suppliers WHERE id = ?", (sid,)).fetchone()
     db.execute("DELETE FROM suppliers WHERE id = ?", (sid,))
+    if srow:
+        audit("刪除供應商", "供應商", sid, srow["name"])
     db.commit()
     return redirect(url_for("suppliers"))
 
@@ -1550,12 +2069,13 @@ def report():
     start = request.args.get("start", "").strip()
     end = request.args.get("end", "").strip()
     cond, params = "", []
-    if start:
+    start_utc, end_utc = local_date_to_utc_range(start, end)
+    if start_utc:
         cond += " AND t.created_at >= ?"
-        params.append(start)
-    if end:
+        params.append(start_utc)
+    if end_utc:
         cond += " AND t.created_at <= ?"
-        params.append(end + " 23:59:59")
+        params.append(end_utc)
     db = get_db()
     rows = [dict(r) for r in db.execute(f"""
         SELECT p.id, p.sku, p.name, p.quantity, p.unit_price,
@@ -1584,17 +2104,20 @@ def report():
     abc_rows = sorted(rows, key=lambda r: r["value"], reverse=True)
     cum = 0.0
     for r in abc_rows:
+        # 分級依據是「本項之前的累積占比」:跨越 80% 門檻的那一項本身仍屬 A
+        # (柏拉圖法則的重點是找出構成多數價值的少數關鍵料號;若改用本項之後的
+        #  累積量判斷,單一高價品占比就會超過 80% 而使 A 級從缺,分級失去意義)
+        prev_pct = (cum / total_value * 100) if total_value > 0 else 100.0
         cum += r["value"]
         cum_pct = (cum / total_value * 100) if total_value > 0 else 100.0
         r["pct_str"] = fmt_num(r["value"] / total_value * 100) if total_value > 0 else "0"
         r["cum_pct_str"] = fmt_num(cum_pct)
-        r["abc"] = "A" if cum_pct <= 80 else ("B" if cum_pct <= 95 else "C")
+        r["abc"] = "A" if prev_pct < 80 else ("B" if prev_pct < 95 else "C")
     # 庫齡分析(Inventory Aging):在庫批次依庫齡分桶
     now_utc = datetime.now(timezone.utc)
     buckets = [["0-30 天", 0, 30, 0], ["31-60 天", 31, 60, 0], ["61-90 天", 61, 90, 0], ["90 天以上", 91, None, 0]]
     for l in db.execute("SELECT qty_remaining, received_at FROM lots WHERE qty_remaining > 0").fetchall():
-        received = datetime.strptime(l["received_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        age = (now_utc - received).days
+        age = (now_utc - parse_utc(l["received_at"])).days
         for b in buckets:
             if age >= b[1] and (b[2] is None or age <= b[2]):
                 b[3] += l["qty_remaining"]
@@ -1696,8 +2219,14 @@ def import_products_rows(rows):
             init_qty = int(init_qty_s) if init_qty_s else 0
             if price < 0 or threshold < 0 or init_qty < 0:
                 raise ValueError
-        except ValueError:
-            report.append({"line": line_no, "label": label, "status": "跳過:數字欄位格式錯誤"})
+            if not math.isfinite(price):
+                raise ValueError
+            # 超大整數會在 INSERT 時丟 OverflowError(非 ValueError),
+            # 若不在此攔下,整批匯入會中斷且已成功的列全部消失
+            if price > MAX_QUANTITY or threshold > MAX_QUANTITY or init_qty > MAX_QUANTITY:
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            report.append({"line": line_no, "label": label, "status": "跳過:數字欄位格式錯誤或數值過大"})
             continue
         supplier_id = None
         if supplier_name:
@@ -1763,7 +2292,7 @@ def import_aliases_rows(rows):
 
 
 @app.route("/import", methods=["GET", "POST"])
-@login_required
+@admin_required
 def csv_import():
     report_rows = None
     ok_count = skip_count = 0
@@ -1785,6 +2314,10 @@ def csv_import():
                 else:
                     ok_count, report_rows = import_products_rows(data_rows)
                 skip_count = len(report_rows) - ok_count
+                db = get_db()
+                audit("CSV 匯入", "匯入", mode,
+                      f"檔名 {file.filename},成功 {ok_count} 筆、跳過 {skip_count} 筆")
+                db.commit()
     return render_page(PAGE_IMPORT, report_rows=report_rows, ok_count=ok_count,
                        skip_count=skip_count, error=error,
                        msg=f"成功匯入 {ok_count} 筆,跳過 {skip_count} 筆" if report_rows is not None and not error else None)
@@ -1794,11 +2327,19 @@ def csv_import():
 # CSV 匯出(UTF-8 加 BOM,Excel 開啟中文不亂碼)
 # ---------------------------------------------------------------------------
 
+def csv_safe(value):
+    # 防 CSV/DDE 公式注入:Excel 會把 = + - @ 開頭的儲存格當公式執行,
+    # 前置單引號讓它保持純文字(使用者可控欄位如品名、備註都會經過這裡)
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 def csv_response(header, data_rows, filename):
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(header)
-    writer.writerows(data_rows)
+    writer.writerows([tuple(csv_safe(c) for c in row) for row in data_rows])
     return Response(
         "\ufeff" + buf.getvalue(),
         mimetype="text/csv",
@@ -1810,7 +2351,7 @@ def csv_response(header, data_rows, filename):
 @app.route("/export/inventory.csv")
 @login_required
 def export_inventory():
-    rows = query_products()
+    rows = query_products(limit=None)
     data = [(r["sku"], r["name"], r["category"], r["unit"], fmt_num(r["unit_price"]),
              r["quantity"], r["low_stock_threshold"], r["supplier_name"] or "",
              fmt_num(r["quantity"] * r["unit_price"])) for r in rows]
@@ -1823,14 +2364,14 @@ def export_inventory():
 @app.route("/export/transactions.csv")
 @login_required
 def export_transactions():
-    rows = query_transactions(history_filters())
-    data = [(r["created_at"], "入庫" if r["type"] == "in" else "出庫", r["sku"],
+    rows = query_transactions(history_filters(), limit=None)
+    data = [(fmt_local(r["created_at"]), "入庫" if r["type"] == "in" else "出庫", r["sku"],
              r["product_name"], r["quantity"], r["unit"], r["lot_info"] or "",
              r["note"], r["username"])
             for r in rows]
     filename = f"transactions_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
     return csv_response(
-        ["時間(UTC)", "類型", "SKU", "商品名稱", "數量", "單位", "批次", "備註", "操作人員"],
+        ["時間(台灣)", "類型", "SKU", "商品名稱", "數量", "單位", "批次", "備註", "操作人員"],
         data, filename)
 
 
@@ -1842,4 +2383,17 @@ init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    start_backup_thread()   # 啟動先備份一份,之後每 24 小時自動備份
+    print(f"庫存管理系統啟動中…")
+    print(f"  資料庫:{os.path.abspath(DB_PATH)}")
+    print(f"  照片:{IMAGE_DIR}")
+    print(f"  備份:{BACKUP_DIR}" + (f"(另同步到 {EXTRA_BACKUP_DIR})" if EXTRA_BACKUP_DIR else ""))
+    try:
+        # waitress:正式營運級伺服器(純 Python、Windows 友善),取代開發用伺服器
+        from waitress import serve
+        print(f"  服務位址:http://0.0.0.0:{port}(waitress)")
+        serve(app, host="0.0.0.0", port=port, threads=8)
+    except ImportError:
+        # 未安裝 waitress 時仍可啟動,確保公司電腦離線安裝失敗也不會卡住
+        print("  注意:未安裝 waitress,改用內建伺服器(建議 pip install waitress)")
+        app.run(host="0.0.0.0", port=port)

@@ -56,14 +56,14 @@
 > 測試前置:先清掉測試資料庫再啟動,session 測試需 cookie jar。**本節條目有順序相依(註冊→登入→建供應商→建商品→入出庫→報表),必須依序執行**;每輪驗收都要先 `rm -f /tmp/verify_inventory.db` 取得乾淨 DB,否則「重複帳號」「首位管理員」等項會誤判。
 >
 > ```bash
-> rm -f /tmp/verify_inventory.db /tmp/inv_cookies.txt
-> INVENTORY_DB=/tmp/verify_inventory.db PORT=5002 python inventory_app.py &
+> rm -rf /tmp/verify_inventory.db* /tmp/inv_cookies.txt /tmp/verify_inventory_images /tmp/backups /tmp/secret_key.txt
+> INVENTORY_DB=/tmp/verify_inventory.db INVENTORY_IMAGES=/tmp/verify_inventory_images PORT=5002 python inventory_app.py &
 > ```
 
 - [ ] **未登入一律導向登入頁**:未帶 cookie GET `/` 回 302,跟隨後可見登入頁。
   - 驗證:`curl -s -o /dev/null -w "%{http_code}" http://localhost:5002/` 為 `302`;`curl -s -L http://localhost:5002/ | grep -c 登入` ≥ 1。
-- [ ] **可註冊帳號,第一位自動為管理員;重複帳號被拒**。
-  - 驗證:`curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5002/register --form-string "username=admin1" --form-string "password=pass1234"` 為 `302`;重送同帳號後輸出含「帳號已存在」;`python3 -c "import sqlite3; print(sqlite3.connect('/tmp/verify_inventory.db').execute('select is_admin from users where username=?',('admin1',)).fetchone())"` 為 `(1,)`。
+- [ ] **首位可註冊且自動為管理員;之後關閉自助註冊**(第四階段起的行為:帳號改由管理員建立,見「安全」節)。
+  - 驗證:`curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5002/register --form-string "username=admin1" --form-string "password=pass1234"` 為 `302`;`python3 -c "import sqlite3; print(sqlite3.connect('/tmp/verify_inventory.db').execute('select is_admin from users where username=?',('admin1',)).fetchone())"` 為 `(1,)`;再次 POST `/register`(任何帳號)輸出含「不開放自助註冊」且使用者數不變。
 - [ ] **登入成功建立 session、失敗顯示訊息**。
   - 驗證:`curl -s -c /tmp/inv_cookies.txt -o /dev/null -w "%{http_code}" -X POST http://localhost:5002/login --form-string "username=admin1" --form-string "password=pass1234"` 為 `302`;`curl -s -b /tmp/inv_cookies.txt http://localhost:5002/ | grep 庫存總覽`;錯誤密碼 POST 後輸出含「帳號或密碼錯誤」。
 - [ ] **供應商新增後列表可見**。
@@ -88,8 +88,8 @@
   - 驗證:`curl -s -b /tmp/inv_cookies.txt -o /tmp/inv.csv -w "%{content_type}" http://localhost:5002/export/inventory.csv` 含 `text/csv`;`python3 -c "print(open('/tmp/inv.csv','rb').read(3)==b'\xef\xbb\xbf')"` 為 `True`;`grep 可樂 /tmp/inv.csv`;`/export/transactions.csv` 同法驗 BOM 且 grep `首批進貨`。
 - [ ] **登出後失去存取權**。
   - 驗證:`curl -s -b /tmp/inv_cookies.txt -c /tmp/inv_cookies.txt -o /dev/null http://localhost:5002/logout` 後,`curl -s -b /tmp/inv_cookies.txt -o /dev/null -w "%{http_code}" http://localhost:5002/history` 為 `302`。
-- [ ] **Render 綁定與依賴管理**:`app.run` 保持 `host="0.0.0.0"`、port 讀 `$PORT`(預設 5000);`requirements.txt` 維持 UTF-16 編碼且 pip 可解析,內容為 Flask + Pillow(以圖搜圖需要),無其他新增依賴。
-  - 驗證:`grep -n 'host="0.0.0.0"' inventory_app.py` 與 `grep -n 'PORT' inventory_app.py` 皆有;`python3 -c "print(open('requirements.txt','rb').read(2))"` 為 `b'\xff\xfe'`;`python3 -c "print('Pillow' in open('requirements.txt', encoding='utf-16').read())"` 為 `True`;`pip install -r requirements.txt --dry-run` 成功。
+- [ ] **Render 綁定與依賴管理**:`host="0.0.0.0"` 與 port 讀 `$PORT`(預設 5000)的契約不變(第四階段起由 waitress 提供服務,未安裝時 fallback 到 `app.run`);`requirements.txt` 維持 UTF-16 編碼且 pip 可解析,內容為 Flask + Pillow(以圖搜圖)+ waitress(正式伺服器)。
+  - 驗證:`grep -c 'host="0.0.0.0"' inventory_app.py` ≥ 1、`grep -n 'PORT' inventory_app.py` 有結果;`python3 -c "print(open('requirements.txt','rb').read(2))"` 為 `b'\xff\xfe'`;`python3 -c "print('Pillow' in open('requirements.txt', encoding='utf-16').read())"` 為 `True`;`pip install -r requirements.txt --dry-run` 成功。
 - [ ] **inventory.db 不入版控**。
   - 驗證:`grep -n 'inventory.db' .gitignore` 有結果;`git status --porcelain | grep inventory.db` 為空。
 - [ ] **原 Patrick app 不受影響**:上方「功能驗收」「部署約束」全部條目(PORT=5001)回歸通過。
@@ -143,6 +143,70 @@
 - [ ] **期初庫存自動補批(讀碼驗證)**:啟動時若商品現時庫存大於批次剩餘總和(舊資料庫升級情境),自動建立期初批補齊,批次帳不留缺口。
   - 驗證:讀碼確認 reconcile 函式存在且於啟動時執行。
 - [ ] **既有全部條目回歸**:上方 Patrick、一階段、二階段所有條目全數重測通過。
+  - 驗證:執行本清單全部項目。
+
+## 庫存系統第四階段:安全強化與營運韌性
+
+> 本節條目來自五視角系統檢測(安全/資料完整/邊界/效能/品質)的實測發現。部分條目需獨立實例測試,測畢務必 kill。
+> 自動化測試:`python test_inventory.py` 必須全綠,是本節的第一道關卡。
+
+### 安全
+
+- [ ] **無法用原始碼裡的舊金鑰偽造登入**:程式不得有硬編碼的可預測 SECRET_KEY;未設環境變數時自動產生持久隨機金鑰檔。
+  - 驗證:`grep -c 'dev-inventory-secret-change-me' inventory_app.py` 為 `0`;啟動後 `ls <DB目錄>/secret_key.txt` 存在;用舊字串 `dev-inventory-secret-change-me` 以 itsdangerous 簽出 `{"user_id":1}` 的 session cookie,帶該 cookie GET `/` 必須為 `302`(被拒),而非 200。
+- [ ] **IP 白名單不可用偽造標頭繞過**:預設只採實際連線來源;`TRUST_PROXY` 未開啟時 X-Forwarded-For 一律不採信。
+  - 驗證:以 `ALLOWED_IPS=203.0.113.5 PORT=5004` 啟動獨立實例;`curl -o /dev/null -w "%{http_code}" http://localhost:5004/` 為 `403`;**帶** `-H "X-Forwarded-For: 203.0.113.5"` 仍必須為 `403`(修正前為 200);再以 `ALLOWED_IPS=127.0.0.1` 啟動則為 `302`。
+- [ ] **權限分層:非管理員不可刪除與匯入**:一般使用者 POST 刪除商品/供應商/照片/別名與 `/import` 皆回 403;入庫/出庫/新增商品/查詢不受影響。
+  - 驗證:管理員建立一般帳號 `staff1` 後以其 cookie:POST `/products/1/delete` 為 `403`、POST `/import` 為 `403`、GET `/users` 為 `403`;但 POST `/stock/in` 為 `302`、GET `/` 為 `200`。
+- [ ] **非管理員介面不顯示管理功能**:一般使用者的頁面不出現「CSV 匯入」「帳號管理」導覽項與刪除按鈕。
+  - 驗證:staff1 的 GET `/` 輸出 `grep -c '帳號管理'` 為 `0`、`grep -c 'CSV 匯入'` 為 `0`。
+- [ ] **關閉自助註冊,帳號由管理員建立**:已有使用者後 `/register` 不再開放;管理員可於 `/users` 新增帳號與重設密碼。
+  - 驗證:已有帳號時 POST `/register` 輸出含「請洽管理員」且 DB 使用者數不變;管理員 POST `/users/new`(username=staff1, password=staff1234)為 `302`,`/users` 頁可見 `staff1`;POST `/users/<id>/password`(新密碼)後 staff1 可用新密碼登入。
+- [ ] **管理員帳號保護**:不可刪除自己、不可刪除最後一位管理員。
+  - 驗證:管理員 POST 刪除自己的帳號,輸出含「不可刪除自己」且帳號仍在。
+- [ ] **CSV 匯出防公式注入**:以 `=`、`+`、`-`、`@` 開頭的欄位在匯出時被跳脫。
+  - 驗證:新增商品名稱為 `=2+5`,`/export/inventory.csv` 下載後 `grep -c "'=2+5"` ≥ 1(前置單引號),且不得出現行首未跳脫的 `=2+5`。
+- [ ] **上傳大小上限**:超過 10MB 的上傳回 413 友善中文訊息而非佔滿記憶體。
+  - 驗證:`head -c 12000000 /dev/urandom > /tmp/big.bin`,POST 至 `/products/1/images` 回 `413`,回應含「檔案過大」。
+- [ ] **密碼長度與登入鎖定**:密碼至少 8 碼;同帳號連續 5 次密碼錯誤後暫時鎖定。
+  - 驗證:建立帳號時密碼填 `abc` 輸出含「至少 8 碼」;對某帳號連續 6 次錯誤密碼登入,第 6 次輸出含「嘗試次數過多」。
+
+### 穩定與效能
+
+- [ ] **SQLite 啟用 WAL 與 busy_timeout**:多人同時讀寫不再出現 `database is locked` 的 500。
+  - 驗證:`python3 -c "import sqlite3;print(sqlite3.connect('/tmp/verify_inventory.db').execute('PRAGMA journal_mode').fetchone()[0])"` 為 `wal`。
+- [ ] **並發實測:讀取歷史時他人入庫不失敗**:一條 `/history` 請求進行中同時發 4 筆入庫,全部須為 302 且庫存正確累加。
+  - 驗證:背景發 `/history` 後立刻並發 4 筆 `POST /stock/in`(各 1 個單位),4 筆皆 `302`,事後該商品庫存正好增加 4。
+- [ ] **lots 交易索引存在**:異動歷史與匯出不因批次表全表掃描而變慢。
+  - 驗證:`python3 -c "import sqlite3;print([r[0] for r in sqlite3.connect('/tmp/verify_inventory.db').execute(\"select name from sqlite_master where type='index'\")])"` 含 `idx_lots_tx`。
+- [ ] **超大數字回友善訊息而非 500**:數量/門檻/單價超出合理範圍時顯示中文提示。
+  - 驗證:POST `/stock/in` quantity=`999999999999999999999999999` 回 `200` 且含「數量」提示(不得為 500);POST `/products/new` low_stock_threshold 同樣超大值亦不得 500。
+- [ ] **isdigit 陷阱不再造成 500**:Unicode 數字字元不得使頁面崩潰。
+  - 驗證:POST `/stock/out` quantity=`²` 不得為 500;GET `/history?product_id=%C2%B2` 不得為 500。
+- [ ] **inf/nan 不得污染報表**:單價/成本填 `inf` 或 `nan` 被拒。
+  - 驗證:POST `/products/new` unit_price=`inf` 輸出含「有效的非負數字」且商品未被建立。
+- [ ] **CSV 匯入壞列跳過、好列照匯**:單列數字異常不得毀掉整批。
+  - 驗證:匯入含 2 筆正常列 + 1 筆超大數字列的 CSV,回應為 `200` 且含「成功匯入 2 筆」,DB 中兩筆正常商品存在(修正前整批 500 全毀)。
+- [ ] **清單分頁**:首頁與異動歷史預設分頁,不再一次吐出全部資料;CSV 匯出仍為完整資料。
+  - 驗證:讀碼確認 `query_products`/`query_transactions` 具 limit/offset 且匯出端點傳 `limit=None`;`/history` 頁面含「下一頁」或「第 1 頁」字樣。
+- [ ] **正式伺服器 waitress**:以 waitress 提供服務,未安裝時可 fallback;Render 綁定字面不變。
+  - 驗證:`grep -c 'waitress' inventory_app.py` ≥ 1;`grep -c 'host="0.0.0.0"' inventory_app.py` ≥ 1;`python3 -c "print('waitress' in open('requirements.txt', encoding='utf-16').read())"` 為 `True`;啟動 log 不再出現 `development server` 警告。
+- [ ] **刪除商品同時清除照片檔**:不留孤兒檔案。
+  - 驗證:建立商品→上傳照片→刪除商品後,照片目錄中該商品的 `img_<pid>_*` 檔案不存在。
+
+### 維運
+
+- [ ] **自動備份**:啟動時產生一份備份,保留最近 14 份;設定 `BACKUP_DIR` 時同步複製一份到該路徑。
+  - 驗證:啟動後 `ls <DB目錄>/backups/inventory_*.db` 至少 1 個檔;備份檔可被 sqlite 開啟且含 `users`/`products`/`lots` 等資料表(啟動時的備份先於首位註冊,故 users 可能為 0 筆,屬正常);以 `BACKUP_DIR=/tmp/verify_backup` 啟動的實例,該目錄亦有備份檔。
+- [ ] **稽核軌跡**:商品/供應商/別名/照片的新增編輯刪除、CSV 匯入、帳號管理皆留下紀錄,管理員可於 `/audit` 檢視。
+  - 驗證:管理員 GET `/audit` 為 `200`,內容含先前操作的動作與操作者 `admin1`;一般使用者 GET `/audit` 為 `403`。
+- [ ] **時間以台灣時間顯示**:頁面與 CSV 的時間欄為台灣時間(UTC+8),資料庫仍存 UTC。
+  - 驗證:`/history` 表頭含「時間(台灣)」;剛建立的異動,其顯示時間與 `date -u +%H` 相差 8 小時(或以 python 比對 DB 中 UTC 字串 +8 小時等於頁面顯示值)。
+- [ ] **日期篩選以台灣日期為準仍正確**:報表既有數字條目(入 50 / 出 45 / 價值 125)不受時區改動影響。
+  - 驗證:重跑第一階段報表條目,結果不變。
+- [ ] **自動化測試全綠**:`test_inventory.py` 覆蓋 FIFO、批次帳恆等式、加權平均成本、ABC、庫齡、權限、輸入邊界、CSV 匯入韌性、公式注入防護。
+  - 驗證:`python3 test_inventory.py` 結束碼為 `0` 且輸出含 `OK`。
+- [ ] **既有 104 檢查點全數回歸**:Patrick、一階段、二階段、三階段所有條目重測通過。
   - 驗證:執行本清單全部項目。
 
 ## 使用者自訂要求(請在此新增你在意的驗收項目)
