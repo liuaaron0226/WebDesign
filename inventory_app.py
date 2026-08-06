@@ -195,41 +195,95 @@ LAYOUT = """
 <html lang="zh-Hant">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>庫存管理系統</title>
     <style>
-        body { font-family: Arial, "Microsoft JhengHei", sans-serif; margin: 0; background: #f7f7f7; }
-        nav { background: #2c3e50; padding: 10px 20px; }
-        nav a { color: #ecf0f1; text-decoration: none; margin-right: 14px; }
-        nav a:hover { text-decoration: underline; }
-        nav .user-info { float: right; color: #bdc3c7; }
-        nav .user-info a { margin-right: 0; }
-        .container { max-width: 1000px; margin: 20px auto; background: #fff; padding: 20px 30px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
-        h1 { font-size: 22px; margin-top: 0; }
-        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-        th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; }
-        th { background: #34495e; color: #fff; }
-        tr.low-stock td { background: #fdecea; }
-        .badge-low { color: #c0392b; font-weight: bold; }
-        .msg { padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; }
-        .msg.error { background: #fdecea; color: #c0392b; border: 1px solid #e6b0aa; }
-        .msg.ok { background: #eafaf1; color: #1e8449; border: 1px solid #a9dfbf; }
-        .banner { background: #fef9e7; border: 1px solid #f7dc6f; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; }
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #eef2f6; color: #1e293b; font-size: 15px; line-height: 1.55;
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
+        nav { position: sticky; top: 0; z-index: 10; background: #1e293b; display: flex; align-items: center;
+              gap: 2px; padding: 0 12px; overflow-x: auto; white-space: nowrap; box-shadow: 0 1px 4px rgba(15,23,42,.25); }
+        nav a { color: #cbd5e1; text-decoration: none; padding: 13px 10px; font-size: 14px; border-bottom: 2px solid transparent; }
+        nav a:hover { color: #fff; border-bottom-color: #60a5fa; }
+        nav .user-info { margin-left: auto; color: #94a3b8; font-size: 13px; padding-left: 12px; }
+        .container { max-width: 1080px; margin: 22px auto; background: #fff; padding: 22px 26px 26px;
+                     border-radius: 14px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+        h1 { font-size: 21px; margin: 0 0 14px; color: #0f172a; }
+        h2 { font-size: 16px; margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid #2563eb; }
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 14px; }
+        th, td { border: 1px solid #e2e8f0; padding: 9px 11px; text-align: left; vertical-align: middle; }
+        th { background: #f1f5f9; color: #334155; font-size: 13px; }
+        tr:not(.low-stock):hover td { background: #f8fafc; }
+        td[id^="qty-"] { font-weight: 700; font-size: 16px; color: #0f172a; }
+        tr.low-stock td { background: #fef2f2; }
+        .badge-low { display: inline-block; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 700;
+                     padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
+        .msg { padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 14px; }
+        .msg.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+        .msg.ok { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+        .banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 11px 14px;
+                  border-radius: 10px; margin-bottom: 14px; }
         form.inline { display: inline; }
-        label { display: block; margin-top: 10px; font-weight: bold; }
-        input[type=text], input[type=password], input[type=number], select {
-            width: 300px; padding: 6px; margin-top: 4px; }
-        input[type=submit], button { padding: 8px 18px; margin-top: 14px; cursor: pointer; }
-        .small-btn { padding: 3px 10px; margin: 0; font-size: 12px; }
-        .filters input, .filters select { width: auto; }
-        .filters input[type=submit] { margin-top: 0; }
-        footer { text-align: center; color: #999; padding: 14px; font-size: 12px; }
-        a.plain { color: #2980b9; }
-        .alias-cell { font-size: 12px; color: #555; }
-        .photo-wall { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+        label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; color: #334155; }
+        input[type=text], input[type=password], input[type=number], input[type=date], select {
+            width: 100%; max-width: 420px; padding: 9px 11px; margin-top: 5px; font-size: 16px;
+            border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+        input:focus, select:focus { outline: 2px solid #bfdbfe; border-color: #2563eb; }
+        input[type=file] { margin-top: 6px; font-size: 14px; }
+        input[type=submit], button { padding: 10px 20px; margin-top: 14px; font-size: 15px; font-weight: 600;
+            color: #fff; background: #2563eb; border: none; border-radius: 8px; cursor: pointer; }
+        input[type=submit]:hover, button:hover { background: #1d4ed8; }
+        .small-btn { padding: 4px 12px; margin: 0; font-size: 12px; font-weight: 600;
+                     color: #b91c1c; background: #fff; border: 1px solid #fca5a5; border-radius: 6px; }
+        .small-btn:hover { background: #fef2f2; color: #b91c1c; }
+        .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 4px; }
+        .filters input, .filters select { width: auto; margin-top: 0; }
+        .filters input[type=submit] { margin-top: 0; padding: 9px 16px; }
+        footer { text-align: center; color: #94a3b8; padding: 16px; font-size: 12px; }
+        a.plain { color: #2563eb; text-decoration: none; }
+        a.plain:hover { text-decoration: underline; }
+        .alias-cell { font-size: 12px; color: #475569; }
+        .photo-wall { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
         .photo-wall .photo-item { text-align: center; }
-        .photo-wall img, img.thumb { max-width: 140px; max-height: 140px; border: 1px solid #ddd; border-radius: 4px; }
-        .detail-section { margin-top: 24px; border-top: 1px solid #eee; padding-top: 12px; }
-        .import-help { background: #f4f6f7; border: 1px solid #d5dbdb; padding: 10px 14px; border-radius: 4px; font-size: 13px; }
+        .photo-wall img, img.thumb { max-width: 150px; max-height: 150px; border: 1px solid #e2e8f0;
+                                     border-radius: 10px; display: block; }
+        .photo-wall .photo-item form { margin-top: 4px; }
+        .detail-section { margin-top: 26px; border-top: 1px solid #eef2f6; padding-top: 16px; }
+        .import-help { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px 16px;
+                       border-radius: 10px; font-size: 13px; color: #334155; }
+        .import-help code { background: #eef2f6; padding: 1px 6px; border-radius: 5px; }
+        .hero-search { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+        .hero-search input[type=text] { flex: 1 1 240px; max-width: none; margin-top: 0; padding: 12px 16px;
+                                        font-size: 16px; border-radius: 10px; }
+        .hero-search select { width: auto; margin-top: 0; border-radius: 10px; }
+        .hero-search input[type=submit] { margin-top: 0; padding: 12px 22px; border-radius: 10px; }
+        .sub-links { margin: 0 0 14px; font-size: 13px; color: #94a3b8; }
+        .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+                         gap: 10px; margin-bottom: 16px; }
+        .quick-actions a { display: block; text-align: center; background: #f8fafc; border: 1px solid #e2e8f0;
+                           border-radius: 12px; padding: 12px 6px; text-decoration: none; color: #1e293b;
+                           font-size: 13px; font-weight: 600; }
+        .quick-actions a:hover { border-color: #93c5fd; background: #eff6ff; }
+        .quick-actions .qa-icon { display: block; font-size: 22px; margin-bottom: 4px; }
+        .auth-box { max-width: 380px; margin: 4vh auto 0; }
+        @media (max-width: 760px) {
+            .container { margin: 10px; padding: 16px 14px 20px; border-radius: 12px; }
+            table { display: block; overflow-x: auto; }
+            table.cards { display: block; overflow: visible; }
+            table.cards tr:first-child { display: none; }
+            table.cards tr { display: block; border: 1px solid #e2e8f0; border-radius: 12px;
+                             margin-bottom: 10px; padding: 8px 14px; background: #fff; }
+            table.cards tr.low-stock { border-color: #fecaca; background: #fef2f2; }
+            table.cards tr.low-stock td { background: transparent; }
+            table.cards td { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+                             border: none; padding: 7px 0; text-align: right;
+                             border-bottom: 1px dashed #eef2f6; }
+            table.cards td:last-child { border-bottom: none; }
+            table.cards td::before { content: attr(data-label); font-weight: 600; color: #64748b;
+                                     font-size: 13px; text-align: left; flex-shrink: 0; }
+            input[type=submit], button { min-height: 44px; }
+            .small-btn, .filters input[type=submit], .hero-search input[type=submit] { min-height: auto; }
+        }
     </style>
 </head>
 <body>
@@ -267,6 +321,7 @@ def render_page(body, **ctx):
 
 
 PAGE_REGISTER = """
+<div class="auth-box">
 <h1>註冊帳號</h1>
 <form method="post">
     <label>帳號</label><input type="text" name="username" value="{{ username or '' }}">
@@ -274,10 +329,12 @@ PAGE_REGISTER = """
     <input type="submit" value="註冊">
 </form>
 <p>已有帳號?<a class="plain" href="{{ url_for('login') }}">前往登入</a></p>
-<p style="color:#888;font-size:13px;">第一位註冊的使用者將自動成為管理員。</p>
+<p style="color:#94a3b8;font-size:13px;">第一位註冊的使用者將自動成為管理員。</p>
+</div>
 """
 
 PAGE_LOGIN = """
+<div class="auth-box">
 <h1>登入庫存管理系統</h1>
 <form method="post">
     <label>帳號</label><input type="text" name="username" value="{{ username or '' }}">
@@ -285,6 +342,7 @@ PAGE_LOGIN = """
     <input type="submit" value="登入">
 </form>
 <p>還沒有帳號?<a class="plain" href="{{ url_for('register') }}">前往註冊</a></p>
+</div>
 """
 
 PAGE_INDEX = """
@@ -292,8 +350,8 @@ PAGE_INDEX = """
 {% if low_count > 0 %}
 <div class="banner">⚠ 目前有 {{ low_count }} 項商品低於庫存門檻,<a class="plain" href="{{ url_for('alerts') }}">查看低庫存警示</a></div>
 {% endif %}
-<form method="get" class="filters">
-    <input type="text" name="q" placeholder="搜尋名稱或 SKU" value="{{ q }}">
+<form method="get" class="hero-search">
+    <input type="text" name="q" placeholder="輸入料號、品名或任一公司的別名料號" value="{{ q }}">
     <select name="category">
         <option value="">全部分類</option>
         {% for c in categories %}
@@ -301,25 +359,33 @@ PAGE_INDEX = """
         {% endfor %}
     </select>
     <input type="submit" value="搜尋">
-    <a class="plain" href="{{ url_for('index') }}">清除</a>
-    &nbsp;|&nbsp;
-    <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
 </form>
+<p class="sub-links">
+    <a class="plain" href="{{ url_for('index') }}">清除搜尋</a> ・
+    <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
+</p>
+<div class="quick-actions">
+    <a href="{{ url_for('stock_in') }}"><span class="qa-icon">📥</span>入庫登記</a>
+    <a href="{{ url_for('stock_out') }}"><span class="qa-icon">📤</span>出庫登記</a>
+    <a href="{{ url_for('image_search') }}"><span class="qa-icon">📷</span>以圖搜圖</a>
+    <a href="{{ url_for('csv_import') }}"><span class="qa-icon">📄</span>CSV 匯入</a>
+    <a href="{{ url_for('product_new') }}"><span class="qa-icon">➕</span>新增商品</a>
+</div>
 {% if products %}
-<table>
+<table class="cards">
     <tr><th>SKU</th><th>名稱</th><th>別名料號</th><th>分類</th><th>庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th><th>操作</th></tr>
     {% for p in products %}
     <tr{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} class="low-stock"{% endif %}>
-        <td>{{ p['sku'] }}</td>
-        <td><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a>{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
-        <td class="alias-cell">{{ p['alias_text'] or '—' }}</td>
-        <td>{{ p['category'] }}</td>
-        <td id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td>{{ p['unit'] }}</td>
-        <td>{{ p['unit_price_str'] }}</td>
-        <td>{{ p['low_stock_threshold'] }}</td>
-        <td>{{ p['supplier_name'] or '—' }}</td>
-        <td>
+        <td data-label="SKU">{{ p['sku'] }}</td>
+        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a>{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
+        <td data-label="別名料號" class="alias-cell">{{ p['alias_text'] or '—' }}</td>
+        <td data-label="分類">{{ p['category'] }}</td>
+        <td data-label="庫存" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="單位">{{ p['unit'] }}</td>
+        <td data-label="單價">{{ p['unit_price_str'] }}</td>
+        <td data-label="低庫存門檻">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
+        <td data-label="操作">
             <a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">詳細</a>
             <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯</a>
             <form class="inline" method="post" action="{{ url_for('product_delete', pid=p['id']) }}"
@@ -339,16 +405,16 @@ PAGE_ALERTS = """
 <h1>低庫存警示</h1>
 {% if products %}
 <p>下列商品庫存已達到或低於門檻,請儘快補貨:</p>
-<table>
+<table class="cards">
     <tr><th>SKU</th><th>名稱</th><th>庫存</th><th>低庫存門檻</th><th>單位</th><th>供應商</th></tr>
     {% for p in products %}
     <tr class="low-stock">
-        <td>{{ p['sku'] }}</td>
-        <td>{{ p['name'] }}</td>
-        <td id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td>{{ p['low_stock_threshold'] }}</td>
-        <td>{{ p['unit'] }}</td>
-        <td>{{ p['supplier_name'] or '—' }}</td>
+        <td data-label="SKU">{{ p['sku'] }}</td>
+        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
+        <td data-label="庫存" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="低庫存門檻">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="單位">{{ p['unit'] }}</td>
+        <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
     </tr>
     {% endfor %}
 </table>
@@ -515,16 +581,16 @@ PAGE_REPORT = """
 
 PAGE_PRODUCT_DETAIL = """
 <h1>商品詳細:{{ p['name'] }}</h1>
-<table>
+<table class="cards">
     <tr><th>SKU</th><th>分類</th><th>目前庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th></tr>
     <tr>
-        <td>{{ p['sku'] }}</td>
-        <td>{{ p['category'] }}</td>
-        <td id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td>{{ p['unit'] }}</td>
-        <td>{{ p['unit_price_str'] }}</td>
-        <td>{{ p['low_stock_threshold'] }}</td>
-        <td>{{ p['supplier_name'] or '—' }}</td>
+        <td data-label="SKU">{{ p['sku'] }}</td>
+        <td data-label="分類">{{ p['category'] }}</td>
+        <td data-label="目前庫存" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="單位">{{ p['unit'] }}</td>
+        <td data-label="單價">{{ p['unit_price_str'] }}</td>
+        <td data-label="低庫存門檻">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
     </tr>
 </table>
 <p>
