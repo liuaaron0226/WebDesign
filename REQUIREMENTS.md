@@ -51,6 +51,22 @@
 - [ ] **介面文字為繁體中文**:標題、欄位說明、按鈕文字皆為繁中(與改版前一致)。
   - 驗證:`curl -s http://localhost:5001/ | grep -c '最小 SOP'` ≥ 1。
 
+## 介面與美術(inventory_app.py)——導覽整合與大膽設計
+
+> 來源:使用者視覺回饋(2026-08):「功能是很多,但我個人比較喜歡精簡,相關的功能就整合在一起」「美術設計方面需要大膽的多加使用,版面都太死板了」。視覺項目的驗證 = 自動檢查(curl/grep)+ Playwright 截圖(桌面 1280px、手機 390px)人工檢視;截圖必須附在驗收回報中。
+
+- [ ] **導覽列精簡分組**:頂層導覽至多 6 個項目(總覽 + 功能群組 + 使用者區);相關功能收進群組選單(庫存作業/商品資料/分析報表/系統管理)。
+  - 驗證:登入後任一頁 HTML 內 `<details class="menu"` ≥ 3(管理員 ≥ 4);頂層 `summary` 數 ≤ 5。
+- [ ] **所有既有功能連結一個不少**:分組只是收納,17 條功能路由的入口全部保留。
+  - 驗證:登入後首頁 HTML 同時 grep 得到 `/stock/in`、`/stock/out`、`/counts`、`/reservations`、`/alerts`、`/products/new`、`/suppliers`、`/search/image`、`/labels`、`/report`、`/history`、`/planning`(管理員另有 `/import`、`/audit`、`/users`)。
+- [ ] **零 JavaScript 原則不破例**:群組選單以純 HTML `<details>/<summary>` 實現。
+  - 驗證:登入後首頁 HTML `grep -c '<script'` = 0。
+- [ ] **大膽視覺**:琥珀主色(CSS 變數)、深色表頭、KPI 色塊(統計卡有色彩區隔)、主要按鈕為主色而非藍色預設。
+  - 驗證:`<style>` 含 `--accent` 變數、`th` 深色底規則、`.stat-box` 色彩規則;截圖人工檢視「不死板」。
+- [ ] **手機 390px 無橫向捲軸**(分組後導覽更省空間,不得倒退)。
+  - 驗證:Playwright 390px 寬檢查 `document.documentElement.scrollWidth <= 390`。
+- [ ] **截圖迭代至少 2 輪**:桌面與手機截圖自我審視後再修,最終截圖以 SendUserFile 附上,由使用者做最終美術裁決。
+
 ## 庫存管理系統(inventory_app.py)驗收
 
 > 測試前置:先清掉測試資料庫再啟動,session 測試需 cookie jar。**本節條目有順序相依(註冊→登入→建供應商→建商品→入出庫→報表),必須依序執行**;每輪驗收都要先 `rm -f /tmp/verify_inventory.db` 取得乾淨 DB,否則「重複帳號」「首位管理員」等項會誤判。
