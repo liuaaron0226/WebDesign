@@ -4,16 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A single-file Flask web app that solves the Petrick's (Patrick) Method for minimal SOP (Sum of Products) Boolean simplification, supporting both single- and multiple-output problems. The UI and comments are in Traditional Chinese. The entire application — routes, solver logic, and the inline HTML template — lives in `patrick_method_solver.py`.
+This repository contains **two independent single-file Flask apps** (UI and comments in Traditional Chinese; neither imports the other):
+
+1. `patrick_method_solver.py` — solves the Petrick's (Patrick) Method for minimal SOP (Sum of Products) Boolean simplification, supporting both single- and multiple-output problems.
+2. `inventory_app.py` — a full inventory management system (庫存管理系統): multi-user auth, product & supplier CRUD, stock-in/out, search, low-stock alerts, transaction history, reports, and CSV export. Data lives in SQLite.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # Flask 3.1 and its dependencies
-python patrick_method_solver.py   # runs on 0.0.0.0, port from $PORT (default 5000)
+pip install -r requirements.txt   # Flask 3.1 and its dependencies (covers both apps; no extra deps)
+python patrick_method_solver.py   # solver app: 0.0.0.0, port from $PORT (default 5000)
+python inventory_app.py           # inventory app: 0.0.0.0, port from $PORT (default 5000)
 ```
 
-There are no tests, linters, or build steps in this repository. The app is deployed to Render, which supplies the `PORT` environment variable — keep the `0.0.0.0` host binding intact.
+There are no tests, linters, or build steps in this repository. Both apps are deployed to Render (each as its own service with its own start command), which supplies the `PORT` environment variable — keep the `0.0.0.0` host binding intact.
 
 Note: `requirements.txt` is UTF-16 encoded (saved on Windows). `pip` handles it, but naive text tools may show garbled content; preserve or normalize the encoding deliberately if you edit it.
 
@@ -26,7 +30,17 @@ Note: `requirements.txt` is UTF-16 encoded (saved on Windows). `pip` handles it,
 - If a new task introduces new requirements, add them to `REQUIREMENTS.md` first, then implement.
 - Testing gotchas: use `curl --form-string` (not `-F`) for inputs containing `;`, and match `&#39;` for apostrophes in HTML responses. The built-in default example's F0 is mathematically unsolvable — "找不到涵蓋所有 minterm 的組合" there is correct behavior, not a bug.
 
-## Architecture
+## Architecture — inventory app (`inventory_app.py`)
+
+Single file: routes, SQLite schema, and inline HTML (a shared `LAYOUT` string + per-page body fragments assembled by `render_page()`).
+
+- **Storage**: SQLite at `inventory.db` (gitignored), path overridable via `INVENTORY_DB` env var — the `/verify` loop uses `INVENTORY_DB=/tmp/verify_inventory.db` for a clean, reproducible DB. Tables (`users`, `suppliers`, `products`, `transactions`) are created idempotently by `init_db()` at startup. Current stock is stored in `products.quantity` and updated in the same SQL transaction as the `transactions` insert; stock-out uses an atomic `UPDATE ... WHERE quantity >= ?` so stock can never go negative.
+- **Auth**: session-based; passwords hashed with `werkzeug.security`. The first registered user becomes admin (`is_admin=1`). `SECRET_KEY` env var should be set in production (dev fallback exists). `/logout` is GET and there is no CSRF token — a deliberate simplification for curl testability, documented in code comments.
+- **Flow convention**: successful POSTs redirect (302, PRG pattern); validation failures re-render the same page with HTTP 200 and an inline error message (so curl can grep for it). No JavaScript dependency anywhere.
+- **CSV export**: UTF-8 with BOM prefix (`\ufeff`) so Excel on Windows renders Chinese correctly.
+- **Deployment note**: on Render's free tier the disk is ephemeral — `inventory.db` is wiped on every redeploy/restart. For real persistence attach a Render Disk or use an external database. Deploy as a second Render service with start command `python inventory_app.py`.
+
+## Architecture — solver app (`patrick_method_solver.py`)
 
 Everything is in `patrick_method_solver.py`:
 
