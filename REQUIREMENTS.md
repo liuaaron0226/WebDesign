@@ -278,6 +278,23 @@
 - [ ] **既有全部條目回歸**:Patrick、一~四階段所有條目重測通過,`python test_inventory.py` 全綠。
   - 驗證:執行本清單全部項目。
 
+## 部署與首次啟動(實機裝機問題修正)
+
+> 來源:使用者實際在公司電腦照步驟裝機失敗。以下條目確保「下載 → 雙擊 → 建帳號」這條路走得通。
+
+- [ ] **Windows 批次檔必須是 CRLF 換行**:`start_inventory.bat` 若為 Unix(LF)換行,cmd.exe 解析多行區塊會出錯,等於無法執行。
+  - 驗證:`python3 -c "raw=open('start_inventory.bat','rb').read(); print(raw.count(b'\r\n') > 0 and raw.count(b'\n') == raw.count(b'\r\n'))"` 為 `True`(每一行都是 CRLF)。
+- [ ] **`.gitattributes` 鎖定批次檔換行**:避免日後在 Linux/Mac 編輯後又被改回 LF。
+  - 驗證:`grep -c '\*.bat' .gitattributes` ≥ 1 且含 `eol=crlf`。
+- [ ] **啟動腳本能適應 Windows 的兩種 Python 呼叫方式**:優先用 `py` 啟動器,找不到才用 `python`(可避開 Microsoft Store 的假 python.exe)。
+  - 驗證:`grep -c 'py -3' start_inventory.bat` ≥ 1 且 `grep -c 'python' start_inventory.bat` ≥ 1。
+- [ ] **依賴安裝失敗時要明確停下並提示**,而不是繼續執行然後噴 ImportError。
+  - 驗證:`grep -c 'goto PIPFAIL\|errorlevel' start_inventory.bat` ≥ 1;讀碼確認失敗分支有 `pause`。
+- [ ] **首次啟動(零帳號)自動導向建立管理員頁**:全新安裝打開首頁不應停在登入頁,而應直接進到「建立管理員帳號」。
+  - 驗證:以全新 DB 啟動後,`curl -s -L http://localhost:5002/ | grep -c '建立管理員帳號'` ≥ 1;建立帳號後再開首頁則導向一般登入頁(`grep -c '登入庫存管理系統'` ≥ 1)。
+- [ ] **已有帳號時 `/register` 仍維持關閉**(不得因上一項而被繞過)。
+  - 驗證:已有使用者時 POST `/register` 輸出仍含「不開放自助註冊」。
+
 ## 使用者自訂要求(請在此新增你在意的驗收項目)
 
 <!-- 範例格式:
