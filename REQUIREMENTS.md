@@ -34,6 +34,23 @@
 - 內建預設範例(PI `A'B, AB`、minterms `1,3`)的 F0 **數學上無解**(`A'B` 涵蓋 4–7、`AB` 涵蓋 12–15),顯示「找不到涵蓋所有 minterm 的組合」是正確結果。
 - 變數固定為 `A,B,C,D` 四個,A 為最高位;非數字的 minterm 會被靜默略過。
 
+## 介面與美術(patrick_method_solver.py)
+
+> 視覺項目的驗證 = 自動檢查(curl/grep)+ Playwright 截圖(桌面 1280px、手機 390px)人工檢視;截圖必須附在驗收回報中。使用者的視覺回饋由 Claude 代寫成新條目加入本節。
+
+- [ ] **RWD 手機可用**:HTML 含 viewport meta;390px 寬截圖無橫向捲軸、內容不溢出。
+  - 驗證:`curl -s http://localhost:5001/ | grep -c 'name="viewport"'` ≥ 1;Playwright 以 390px 寬截圖檢視,並檢查 `document.documentElement.scrollWidth <= 390`。
+- [ ] **非瀏覽器預設樣式**:有自訂配色、繁中友善字體堆疊、卡片式布局(頁面主體置中、有視覺層次)。
+  - 驗證:HTML 的 `<style>` 含自訂 `font-family` 與背景色設定;截圖檢視非白底 Times/Arial 預設樣貌。
+- [ ] **結果區清楚可讀**:計算結果與輸入表單有視覺區隔(不同底色/邊框),SOP 結果以等寬字體呈現。
+  - 驗證:結果區 CSS 含 `monospace` 類字體堆疊與獨立底色;POST 預設範例後截圖檢視。
+- [ ] **表單控件有樣式**:textarea 與送出按鈕經過設計(圓角/邊框/hover 狀態),按鈕為明顯的主色調。
+  - 驗證:`<style>` 內含按鈕 hover 規則;截圖檢視。
+- [ ] **對比度足夠**:內文文字與背景對比明顯(深色文字配淺色底),無灰底灰字。
+  - 驗證:截圖檢視;主文字色與背景色的 CSS 值差異明顯。
+- [ ] **介面文字為繁體中文**:標題、欄位說明、按鈕文字皆為繁中(與改版前一致)。
+  - 驗證:`curl -s http://localhost:5001/ | grep -c '最小 SOP'` ≥ 1。
+
 ## 庫存管理系統(inventory_app.py)驗收
 
 > 測試前置:先清掉測試資料庫再啟動,session 測試需 cookie jar。**本節條目有順序相依(註冊→登入→建供應商→建商品→入出庫→報表),必須依序執行**;每輪驗收都要先 `rm -f /tmp/verify_inventory.db` 取得乾淨 DB,否則「重複帳號」「首位管理員」等項會誤判。

@@ -30,6 +30,15 @@ Note: `requirements.txt` is UTF-16 encoded (saved on Windows). `pip` handles it,
 - If a new task introduces new requirements, add them to `REQUIREMENTS.md` first, then implement.
 - Testing gotchas: use `curl --form-string` (not `-F`) for inputs containing `;`, and match `&#39;` for apostrophes in HTML responses. The built-in default example's F0 is mathematically unsolvable — "找不到涵蓋所有 minterm 的組合" there is correct behavior, not a bug.
 
+## 持續迭代原則 (Continuous iteration)
+
+一次到位是不可預期的,尤其是視覺設計。以下規則強制「持續更新」:
+
+- **側寫是活文件**:session 中觀察到使用者新的用詞習慣、被糾正的解讀、或新偏好(含美術偏好)時,應主動提議更新本檔的側寫章節(走 PR、由使用者確認),不等使用者要求。
+- **設計/UI 任務的截圖迭代義務**:凡涉及介面外觀的修改,必須跑截圖迭代循環——修改 → 以 Playwright(Chromium 位於 `/opt/pw-browsers/chromium`,勿執行 `playwright install`)截取桌面(1280px)與手機(390px)寬度截圖 → 自我審視(排版、對比、擁擠度、RWD、中文字體)→ 再修,內部至少 2 輪。
+- **成品必須讓使用者看得到**:設計類任務的最終回報必須附上截圖(SendUserFile),由使用者做最終美術裁決;「程式碼寫完了」不等於「設計完成了」。
+- **使用者的視覺回饋落地**:使用者對外觀的任何評語(太擠、顏色不對、字太小…)由 Claude 代寫成 REQUIREMENTS.md「介面與美術」節的可驗證條目,成為下一輪迭代的驗收標準。
+
 ## Architecture — inventory app (`inventory_app.py`)
 
 Single file: routes, SQLite schema, and inline HTML (a shared `LAYOUT` string + per-page body fragments assembled by `render_page()`).
