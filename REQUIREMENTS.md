@@ -120,6 +120,31 @@
 - [ ] **內網部署啟動腳本存在且正確**:`start_inventory.bat`(Windows)與 `start_inventory.sh`(Mac/Linux)皆存在,內容含依賴安裝與 `python inventory_app.py` 啟動(讀碼驗證)。
   - 驗證:`grep -l "inventory_app.py" start_inventory.bat start_inventory.sh` 列出兩檔;`bash -n start_inventory.sh` 無語法錯誤。
 
+## 庫存系統第三階段:批次管理與存貨管理理論(FIFO/庫齡/成本/ABC)
+
+> 接續上節測試序列執行(同一測試 DB、同一 cookie jar,上節結尾為已登入狀態、商品 1 庫存 12)。理論依據:批次追溯(Lot Tracking)、先進先出(FIFO)、庫齡分析(Inventory Aging)、加權平均成本(存貨計價)、ABC 分析(柏拉圖法則)。
+
+- [ ] **入庫自動建立批次**:每筆入庫建立一個批次(自動批號 `L<日期>-<流水>`),商品詳細頁有「批次庫存」區,依入庫時間排序顯示批號、入庫時間、庫齡、剩餘數量。
+  - 驗證:POST `/stock/in`(product_id=1, quantity=10)後,`curl -s -b /tmp/inv_cookies.txt http://localhost:5002/products/1` 輸出含「批次庫存」「庫齡」與自動批號前綴 `L20`。
+- [ ] **自訂批號與成本單價;同商品批號不可重複**:入庫可填批號(如供應商批號)與成本單價。
+  - 驗證:POST `/stock/in`(product_id=1, quantity=5, lot_no=B-TEST-01, unit_cost=12.5)回 302,詳細頁含 `B-TEST-01`;重送同批號輸出含「此商品已有相同批號」。
+- [ ] **FIFO 先進先出出庫**:出庫自動從最早批次扣起,跨批次分攤;批次剩餘總和恆等於商品現時庫存。
+  - 驗證:新建商品(sku=SKU005)→ 入庫 10(自動批)→ 入庫 20(lot_no=B2)→ 出庫 15;以 sqlite 查該商品批次 `qty_remaining` 依序為 `[0, 15]`,且總和等於 `products.quantity`(15)。
+- [ ] **批次追溯**:出庫異動記錄消耗了哪些批次;異動歷史顯示批次明細(入庫顯示批號、出庫顯示各批消耗量)。
+  - 驗證:`curl -s -b /tmp/inv_cookies.txt http://localhost:5002/history` 輸出含 `B2×5`(上一項出庫 15 = 首批×10 + B2×5)。
+- [ ] **全商品批次帳一致性**:所有商品的批次剩餘總和 = `products.quantity`(含 CSV 匯入初始庫存也建批次)。
+  - 驗證:sqlite 逐商品比對 `SUM(lots.qty_remaining)` 與 `quantity`,全部相等。
+- [ ] **報表:庫齡分析**:報表頁有「庫齡分析」區,依 0-30 / 31-60 / 61-90 / 90 天以上分桶統計在庫數量。
+  - 驗證:`curl -s -b /tmp/inv_cookies.txt http://localhost:5002/report | grep 庫齡分析` 且含 `0-30 天`。
+- [ ] **報表:加權平均成本**:有記成本的商品顯示加權平均成本(僅以尚有剩餘且有成本的批次計算)。
+  - 驗證:`/report` 輸出含「平均成本」且含 `12.5`(商品 1 唯一有成本批次 B-TEST-01)。
+- [ ] **報表:ABC 分析**:依庫存價值由高至低累積占比分級(≤80% 為 A、≤95% 為 B、其餘 C)。
+  - 驗證:`/report` 輸出含「ABC 分析」與 A/B/C 分級標示。
+- [ ] **期初庫存自動補批(讀碼驗證)**:啟動時若商品現時庫存大於批次剩餘總和(舊資料庫升級情境),自動建立期初批補齊,批次帳不留缺口。
+  - 驗證:讀碼確認 reconcile 函式存在且於啟動時執行。
+- [ ] **既有全部條目回歸**:上方 Patrick、一階段、二階段所有條目全數重測通過。
+  - 驗證:執行本清單全部項目。
+
 ## 使用者自訂要求(請在此新增你在意的驗收項目)
 
 <!-- 範例格式:

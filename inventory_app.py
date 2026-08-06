@@ -138,10 +138,54 @@ def init_db():
             created_at    TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_img_product ON product_images(product_id);
+        -- 批次管理(Lot Tracking):每筆入庫一批,出庫依 FIFO 消耗並記錄追溯
+        CREATE TABLE IF NOT EXISTS lots (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id     INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            transaction_id INTEGER REFERENCES transactions(id),
+            lot_no         TEXT NOT NULL,
+            qty_received   INTEGER NOT NULL CHECK (qty_received > 0),
+            qty_remaining  INTEGER NOT NULL CHECK (qty_remaining >= 0),
+            unit_cost      REAL,
+            note           TEXT DEFAULT '',
+            received_at    TEXT NOT NULL,
+            UNIQUE(product_id, lot_no)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lots_product ON lots(product_id);
+        CREATE TABLE IF NOT EXISTS lot_consumptions (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+            lot_id         INTEGER NOT NULL REFERENCES lots(id),
+            quantity       INTEGER NOT NULL CHECK (quantity > 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lc_tx ON lot_consumptions(transaction_id);
     """)
     conn.commit()
     conn.close()
     os.makedirs(IMAGE_DIR, exist_ok=True)
+    reconcile_lots()
+
+
+def reconcile_lots():
+    # 期初自動補批:舊資料庫升級時,若商品現時庫存大於批次剩餘總和,
+    # 以「期初批」補齊缺口,確保批次帳與總帳恆一致(批次剩餘總和 = quantity)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT p.id, p.quantity,
+               COALESCE((SELECT SUM(l.qty_remaining) FROM lots l WHERE l.product_id = p.id), 0) AS lot_sum
+        FROM products p
+    """).fetchall()
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    for r in rows:
+        gap = r["quantity"] - r["lot_sum"]
+        if gap > 0:
+            conn.execute("""
+                INSERT OR IGNORE INTO lots (product_id, lot_no, qty_received, qty_remaining, note, received_at)
+                VALUES (?, ?, ?, ?, '期初庫存自動補批', ?)
+            """, (r["id"], f"INIT-{r['id']}", gap, gap, stamp))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +213,14 @@ def now_str():
 
 
 def fmt_num(value):
-    # 數字顯示:整數不帶小數點,小數去尾零(125.0 → 125、25.5 → 25.5)
+    # 數字(無千分位):整數不帶小數點,小數去尾零(125.0 → 125、25.5 → 25.5)
+    # 用於表單值與 CSV(千分位會讓 float() 與 Excel 數值欄位解析失敗)
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def fmt_money(value):
+    # 金額顯示(含千分位,僅供頁面顯示):12000 → 12,000
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +255,7 @@ LAYOUT = """
               gap: 2px; padding: 0 12px; overflow-x: auto; white-space: nowrap; box-shadow: 0 1px 4px rgba(15,23,42,.25); }
         nav a { color: #cbd5e1; text-decoration: none; padding: 13px 10px; font-size: 14px; border-bottom: 2px solid transparent; }
         nav a:hover { color: #fff; border-bottom-color: #60a5fa; }
+        nav a.active { color: #fff; border-bottom-color: #3b82f6; }
         nav .user-info { margin-left: auto; color: #94a3b8; font-size: 13px; padding-left: 12px; }
         .container { max-width: 1080px; margin: 22px auto; background: #fff; padding: 22px 26px 26px;
                      border-radius: 14px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
@@ -215,7 +266,9 @@ LAYOUT = """
         th { background: #f1f5f9; color: #334155; font-size: 13px; }
         tr:not(.low-stock):hover td { background: #f8fafc; }
         td[id^="qty-"] { font-weight: 700; font-size: 16px; color: #0f172a; }
+        th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
         tr.low-stock td { background: #fef2f2; }
+        tr.lot-empty td { color: #94a3b8; }
         .badge-low { display: inline-block; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 700;
                      padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
         .msg { padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 14px; }
@@ -223,6 +276,8 @@ LAYOUT = """
         .msg.ok { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
         .banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 11px 14px;
                   border-radius: 10px; margin-bottom: 14px; }
+        .banner a { display: inline-block; padding: 4px 0; }
+        .note { color: #64748b; font-size: 13px; }
         form.inline { display: inline; }
         label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; color: #334155; }
         input[type=text], input[type=password], input[type=number], input[type=date], select {
@@ -230,12 +285,12 @@ LAYOUT = """
             border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
         input:focus, select:focus { outline: 2px solid #bfdbfe; border-color: #2563eb; }
         input[type=file] { margin-top: 6px; font-size: 14px; }
-        input[type=submit], button { padding: 10px 20px; margin-top: 14px; font-size: 15px; font-weight: 600;
+        input[type=submit], button { display: block; padding: 10px 20px; margin-top: 14px; font-size: 15px; font-weight: 600;
             color: #fff; background: #2563eb; border: none; border-radius: 8px; cursor: pointer; }
         input[type=submit]:hover, button:hover { background: #1d4ed8; }
-        .small-btn { padding: 4px 12px; margin: 0; font-size: 12px; font-weight: 600;
-                     color: #b91c1c; background: #fff; border: 1px solid #fca5a5; border-radius: 6px; }
-        .small-btn:hover { background: #fef2f2; color: #b91c1c; }
+        .small-btn { display: inline-block; padding: 4px 10px; margin: 0; font-size: 12px; font-weight: 600;
+                     color: #b91c1c; background: transparent; border: 1px solid transparent; border-radius: 6px; }
+        .small-btn:hover { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
         .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 4px; }
         .filters input, .filters select { width: auto; margin-top: 0; }
         .filters input[type=submit] { margin-top: 0; padding: 9px 16px; }
@@ -265,13 +320,30 @@ LAYOUT = """
                            font-size: 13px; font-weight: 600; }
         .quick-actions a:hover { border-color: #93c5fd; background: #eff6ff; }
         .quick-actions .qa-icon { display: block; font-size: 22px; margin-bottom: 4px; }
-        .auth-box { max-width: 380px; margin: 4vh auto 0; }
+        .qa-in { color: #15803d; font-weight: 700; }
+        .qa-out { color: #b45309; font-weight: 700; }
+        .action-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+        .action-links a { display: inline-block; padding: 9px 14px; border: 1px solid #cbd5e1; border-radius: 8px;
+                          text-decoration: none; color: #1e293b; font-weight: 600; font-size: 14px; }
+        .action-links a:hover { border-color: #93c5fd; background: #eff6ff; }
+        .action-links a.primary { border-color: #93c5fd; color: #1d4ed8; }
+        .auth-box { max-width: 380px; margin: 0 auto; }
+        .container:has(.auth-box) { max-width: 440px; margin-top: 9vh; }
         @media (max-width: 760px) {
             .container { margin: 10px; padding: 16px 14px 20px; border-radius: 12px; }
+            /* 導覽列換行完整顯示,不靠橫向捲動(使用者才找得到全部功能與登出) */
+            nav { flex-wrap: wrap; white-space: normal; overflow-x: visible; position: static; padding: 2px 10px; }
+            nav a { padding: 9px 8px; }
+            nav .user-info { flex-basis: 100%; padding: 2px 0 8px; }
+            /* 一般表格:tbody 撐滿寬度、必要時橫向捲動 */
             table { display: block; overflow-x: auto; }
+            table:not(.cards) tbody { display: table; width: 100%; }
+            table:not(.cards) th { white-space: nowrap; }
+            /* 卡片式表格:名稱當標題、庫存緊隨,次要欄位縮小 */
             table.cards { display: block; overflow: visible; }
+            table.cards tbody { display: block; width: 100%; }
             table.cards tr:first-child { display: none; }
-            table.cards tr { display: block; border: 1px solid #e2e8f0; border-radius: 12px;
+            table.cards tr { display: flex; flex-direction: column; border: 1px solid #e2e8f0; border-radius: 12px;
                              margin-bottom: 10px; padding: 8px 14px; background: #fff; }
             table.cards tr.low-stock { border-color: #fecaca; background: #fef2f2; }
             table.cards tr.low-stock td { background: transparent; }
@@ -281,24 +353,35 @@ LAYOUT = """
             table.cards td:last-child { border-bottom: none; }
             table.cards td::before { content: attr(data-label); font-weight: 600; color: #64748b;
                                      font-size: 13px; text-align: left; flex-shrink: 0; }
+            table.cards td[data-label="名稱"] { order: -2; font-size: 17px; font-weight: 700;
+                                                justify-content: flex-start; text-align: left; }
+            table.cards td[data-label="名稱"]::before { content: none; }
+            table.cards td[data-label="庫存"], table.cards td[data-label="目前庫存"] { order: -1; }
+            table.cards td[data-label="別名料號"], table.cards td[data-label="單價"],
+            table.cards td[data-label="低庫存門檻"] { font-size: 12px; color: #64748b; }
+            /* 觸控目標:操作連結與刪除鈕加大 */
+            table.cards td[data-label="操作"] a.plain { display: inline-block; padding: 8px 12px; }
+            .small-btn { min-height: 40px; padding: 8px 14px; font-size: 13px; border-color: #fca5a5; }
             input[type=submit], button { min-height: 44px; }
-            .small-btn, .filters input[type=submit], .hero-search input[type=submit] { min-height: auto; }
+            .filters input[type=submit], .hero-search input[type=submit] { min-height: auto; }
+            /* 直式表單的主要送出鈕滿版好按(篩選列與搜尋列除外) */
+            form:not(.filters):not(.hero-search):not(.inline) > input[type=submit] { width: 100%; }
         }
     </style>
 </head>
 <body>
     {% if session.get('user_id') %}
     <nav>
-        <a href="{{ url_for('index') }}">庫存總覽</a>
-        <a href="{{ url_for('alerts') }}">低庫存警示</a>
-        <a href="{{ url_for('stock_in') }}">入庫</a>
-        <a href="{{ url_for('stock_out') }}">出庫</a>
-        <a href="{{ url_for('history') }}">異動歷史</a>
-        <a href="{{ url_for('suppliers') }}">供應商</a>
-        <a href="{{ url_for('report') }}">報表</a>
-        <a href="{{ url_for('product_new') }}">新增商品</a>
-        <a href="{{ url_for('image_search') }}">以圖搜圖</a>
-        <a href="{{ url_for('csv_import') }}">CSV 匯入</a>
+        <a {% if request.path == '/' %}class="active" {% endif %}href="{{ url_for('index') }}">庫存總覽</a>
+        <a {% if request.path == '/alerts' %}class="active" {% endif %}href="{{ url_for('alerts') }}">低庫存警示</a>
+        <a {% if request.path == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫</a>
+        <a {% if request.path == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫</a>
+        <a {% if request.path == '/history' %}class="active" {% endif %}href="{{ url_for('history') }}">異動歷史</a>
+        <a {% if request.path.startswith('/suppliers') %}class="active" {% endif %}href="{{ url_for('suppliers') }}">供應商</a>
+        <a {% if request.path == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">報表</a>
+        <a {% if request.path == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
+        <a {% if request.path == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖搜圖</a>
+        <a {% if request.path == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
         <span class="user-info">使用者:{{ session.get('username') }}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
     </nav>
     {% endif %}
@@ -329,7 +412,7 @@ PAGE_REGISTER = """
     <input type="submit" value="註冊">
 </form>
 <p>已有帳號?<a class="plain" href="{{ url_for('login') }}">前往登入</a></p>
-<p style="color:#94a3b8;font-size:13px;">第一位註冊的使用者將自動成為管理員。</p>
+<p class="note">第一位註冊的使用者將自動成為管理員。</p>
 </div>
 """
 
@@ -365,8 +448,8 @@ PAGE_INDEX = """
     <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
 </p>
 <div class="quick-actions">
-    <a href="{{ url_for('stock_in') }}"><span class="qa-icon">📥</span>入庫登記</a>
-    <a href="{{ url_for('stock_out') }}"><span class="qa-icon">📤</span>出庫登記</a>
+    <a href="{{ url_for('stock_in') }}"><span class="qa-icon qa-in">⬇</span>入庫登記</a>
+    <a href="{{ url_for('stock_out') }}"><span class="qa-icon qa-out">⬆</span>出庫登記</a>
     <a href="{{ url_for('image_search') }}"><span class="qa-icon">📷</span>以圖搜圖</a>
     <a href="{{ url_for('csv_import') }}"><span class="qa-icon">📄</span>CSV 匯入</a>
     <a href="{{ url_for('product_new') }}"><span class="qa-icon">➕</span>新增商品</a>
@@ -396,8 +479,10 @@ PAGE_INDEX = """
     </tr>
     {% endfor %}
 </table>
+{% elif q or category %}
+<p>查無商品:找不到符合條件的資料。可以試試改用其他公司的別名料號搜尋,或確認關鍵字是否正確。</p>
 {% else %}
-<p>查無商品。</p>
+<p>目前沒有任何商品。<a class="plain" href="{{ url_for('product_new') }}">新增第一筆商品</a>,或用 <a class="plain" href="{{ url_for('csv_import') }}">CSV 匯入</a>整批建檔。</p>
 {% endif %}
 """
 
@@ -439,9 +524,9 @@ PAGE_PRODUCT_FORM = """
         <option value="{{ s['id'] }}" {% if f['supplier_id']|string == s['id']|string %}selected{% endif %}>{{ s['name'] }}</option>
         {% endfor %}
     </select>
-    <br><input type="submit" value="儲存">
+    <input type="submit" value="儲存">
 </form>
-<p style="color:#888;font-size:13px;">庫存數量不在此處修改,請透過「入庫 / 出庫」登記異動。</p>
+<p class="note">庫存數量不在此處修改,請透過「入庫 / 出庫」登記異動。</p>
 """
 
 PAGE_STOCK_FORM = """
@@ -454,9 +539,16 @@ PAGE_STOCK_FORM = """
         <option value="{{ p['id'] }}" {% if f['product_id']|string == p['id']|string %}selected{% endif %}>{{ p['name'] }}({{ p['sku'] }},目前庫存 {{ p['quantity'] }} {{ p['unit'] }})</option>
         {% endfor %}
     </select>
-    <label>數量</label><input type="number" name="quantity" min="1" value="{{ f['quantity'] }}">
+    <label>數量</label><input type="number" name="quantity" min="1" inputmode="numeric" value="{{ f['quantity'] }}">
+    {% if is_in %}
+    <label>批號(選填,未填自動編號)</label><input type="text" name="lot_no" value="{{ f['lot_no'] }}" placeholder="例:供應商批號">
+    <label>成本單價(選填,供加權平均成本報表)</label><input type="text" name="unit_cost" value="{{ f['unit_cost'] }}" inputmode="decimal">
+    {% endif %}
     <label>備註</label><input type="text" name="note" value="{{ f['note'] }}">
     <input type="submit" value="{{ title }}">
+    {% if not is_in %}
+    <p class="note">出庫依 FIFO 先進先出原則,自動從最早入庫的批次扣減,消耗明細記錄於異動歷史。</p>
+    {% endif %}
 </form>
 {% else %}
 <p>目前沒有任何商品,請先<a class="plain" href="{{ url_for('product_new') }}">新增商品</a>。</p>
@@ -486,14 +578,15 @@ PAGE_HISTORY = """
 </form>
 {% if rows %}
 <table>
-    <tr><th>時間(UTC)</th><th>類型</th><th>商品</th><th>SKU</th><th>數量</th><th>備註</th><th>操作人員</th></tr>
+    <tr><th>時間(UTC)</th><th>類型</th><th>商品</th><th>SKU</th><th>數量</th><th>批次</th><th>備註</th><th>操作人員</th></tr>
     {% for r in rows %}
     <tr>
         <td>{{ r['created_at'] }}</td>
         <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
         <td>{{ r['product_name'] }}</td>
         <td>{{ r['sku'] }}</td>
-        <td>{{ r['quantity'] }}</td>
+        <td class="num">{{ r['quantity'] }}</td>
+        <td class="alias-cell">{{ r['lot_info'] or '—' }}</td>
         <td>{{ r['note'] }}</td>
         <td>{{ r['username'] }}</td>
     </tr>
@@ -551,32 +644,67 @@ PAGE_REPORT = """
     <input type="submit" value="套用區間">
     <a class="plain" href="{{ url_for('report') }}">清除</a>
 </form>
-<p style="color:#888;font-size:13px;">入庫/出庫總量統計{% if start or end %}套用上方日期區間{% else %}為全部期間{% endif %};「目前庫存」與「庫存價值」一律為現時狀態。</p>
+<p class="note">入庫/出庫總量統計{% if start or end %}套用上方日期區間{% else %}為全部期間{% endif %};「目前庫存」「庫存價值」「平均成本」一律為現時狀態。</p>
 <table>
-    <tr><th>SKU</th><th>名稱</th><th>入庫總量</th><th>出庫總量</th><th>淨變動</th><th>目前庫存</th><th>單價</th><th>庫存價值</th></tr>
+    <tr><th>SKU</th><th>名稱</th><th class="num">入庫總量</th><th class="num">出庫總量</th><th class="num">淨變動</th><th class="num">目前庫存</th><th class="num">單價</th><th class="num">平均成本</th><th class="num">庫存價值</th></tr>
     {% for r in rows %}
     <tr>
         <td>{{ r['sku'] }}</td>
         <td>{{ r['name'] }}</td>
-        <td id="in-{{ r['id'] }}">{{ r['total_in'] }}</td>
-        <td id="out-{{ r['id'] }}">{{ r['total_out'] }}</td>
-        <td>{{ r['net'] }}</td>
-        <td id="qty-{{ r['id'] }}">{{ r['quantity'] }}</td>
-        <td>{{ r['unit_price_str'] }}</td>
-        <td id="value-{{ r['id'] }}">{{ r['value_str'] }}</td>
+        <td class="num" id="in-{{ r['id'] }}">{{ r['total_in'] }}</td>
+        <td class="num" id="out-{{ r['id'] }}">{{ r['total_out'] }}</td>
+        <td class="num">{{ r['net'] }}</td>
+        <td class="num" id="qty-{{ r['id'] }}">{{ r['quantity'] }}</td>
+        <td class="num">{{ r['unit_price_str'] }}</td>
+        <td class="num">{{ r['avg_cost_str'] }}</td>
+        <td class="num" id="value-{{ r['id'] }}">{{ r['value_str'] }}</td>
     </tr>
     {% endfor %}
     <tr>
         <th colspan="2">總計</th>
-        <th id="total-in">{{ total_in }}</th>
-        <th id="total-out">{{ total_out }}</th>
-        <th>{{ total_net }}</th>
-        <th id="total-qty">{{ total_qty }}</th>
+        <th class="num" id="total-in">{{ total_in }}</th>
+        <th class="num" id="total-out">{{ total_out }}</th>
+        <th class="num">{{ total_net }}</th>
+        <th class="num" id="total-qty">{{ total_qty }}</th>
         <th></th>
-        <th id="total-value">{{ total_value_str }}</th>
+        <th></th>
+        <th class="num" id="total-value">{{ total_value_str }}</th>
     </tr>
 </table>
-<p>庫存總價值:<strong id="report-total-value">{{ total_value_str }}</strong></p>
+<p class="note">平均成本為加權平均成本(存貨計價):僅以尚有剩餘且有登記成本的批次計算,「—」表示無成本資料。</p>
+
+<div class="detail-section">
+    <h2>庫齡分析(Inventory Aging)</h2>
+    <table>
+        <tr><th>庫齡區間</th><th class="num">在庫數量</th><th class="num">占比</th></tr>
+        {% for b in aging %}
+        <tr>
+            <td>{{ b['label'] }}</td>
+            <td class="num">{{ b['qty'] }}</td>
+            <td class="num">{{ b['pct_str'] }}%</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <p class="note">依各批次入庫時間計算;90 天以上的在庫批次通常代表呆滯風險,建議優先檢視與去化。</p>
+</div>
+
+<div class="detail-section">
+    <h2>ABC 分析(柏拉圖法則)</h2>
+    <table>
+        <tr><th>分級</th><th>SKU</th><th>名稱</th><th class="num">庫存價值</th><th class="num">價值占比</th><th class="num">累積占比</th></tr>
+        {% for r in abc_rows %}
+        <tr>
+            <td><strong>{{ r['abc'] }}</strong></td>
+            <td>{{ r['sku'] }}</td>
+            <td>{{ r['name'] }}</td>
+            <td class="num">{{ r['value_str'] }}</td>
+            <td class="num">{{ r['pct_str'] }}%</td>
+            <td class="num">{{ r['cum_pct_str'] }}%</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <p class="note">A 級(累積價值 ≤80%)是最該重點盤點與控管的少數關鍵料號;B 級(≤95%)次之;C 級數量多但價值低,可放寬管理頻率。</p>
+</div>
 """
 
 PAGE_PRODUCT_DETAIL = """
@@ -593,12 +721,12 @@ PAGE_PRODUCT_DETAIL = """
         <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
     </tr>
 </table>
-<p>
-    <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯基本資料</a> |
-    <a class="plain" href="{{ url_for('stock_in', product_id=p['id']) }}">入庫</a> |
-    <a class="plain" href="{{ url_for('stock_out', product_id=p['id']) }}">出庫</a> |
-    <a class="plain" href="{{ url_for('history', product_id=p['id']) }}">完整異動歷史</a>
-</p>
+<div class="action-links">
+    <a class="primary" href="{{ url_for('stock_in', product_id=p['id']) }}"><span class="qa-in">⬇</span> 入庫</a>
+    <a class="primary" href="{{ url_for('stock_out', product_id=p['id']) }}"><span class="qa-out">⬆</span> 出庫</a>
+    <a href="{{ url_for('product_edit', pid=p['id']) }}">編輯基本資料</a>
+    <a href="{{ url_for('history', product_id=p['id']) }}">完整異動歷史</a>
+</div>
 
 <div class="detail-section">
     <h2>照片</h2>
@@ -634,7 +762,8 @@ PAGE_PRODUCT_DETAIL = """
             <td>{{ a['alias_sku'] }}</td>
             <td>{{ a['note'] }}</td>
             <td>
-                <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}">
+                <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}"
+                      onsubmit="return confirm('確定刪除別名「{{ a['company'] }}:{{ a['alias_sku'] }}」?');">
                     <button class="small-btn" type="submit">刪除</button>
                 </form>
             </td>
@@ -650,6 +779,28 @@ PAGE_PRODUCT_DETAIL = """
         <label>備註</label><input type="text" name="note">
         <input type="submit" value="新增別名">
     </form>
+</div>
+
+<div class="detail-section">
+    <h2>批次庫存(FIFO 先進先出)</h2>
+    {% if lots %}
+    <table class="cards">
+        <tr><th>批號</th><th>入庫時間(UTC)</th><th>庫齡(天)</th><th>剩餘 / 原始</th><th>成本單價</th><th>備註</th></tr>
+        {% for l in lots %}
+        <tr{% if l['qty_remaining'] == 0 %} class="lot-empty"{% endif %}>
+            <td data-label="批號">{{ l['lot_no'] }}</td>
+            <td data-label="入庫時間">{{ l['received_at'] }}</td>
+            <td data-label="庫齡(天)" class="num">{{ l['age_days'] }}</td>
+            <td data-label="剩餘/原始" class="num">{{ l['qty_remaining'] }} / {{ l['qty_received'] }}</td>
+            <td data-label="成本單價" class="num">{{ l['cost_str'] }}</td>
+            <td data-label="備註">{{ l['note'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <p class="note">出庫依 FIFO 先進先出原則自動從最早批次扣減;各筆出庫的批次消耗明細見異動歷史。</p>
+    {% else %}
+    <p>尚無批次紀錄,入庫後會自動建立批次。</p>
+    {% endif %}
 </div>
 
 <div class="detail-section">
@@ -822,7 +973,7 @@ def query_products(q="", category=""):
     sql += " ORDER BY p.id"
     rows = [dict(r) for r in get_db().execute(sql, params).fetchall()]
     for r in rows:
-        r["unit_price_str"] = fmt_num(r["unit_price"])
+        r["unit_price_str"] = fmt_money(r["unit_price"])
     return rows
 
 
@@ -985,7 +1136,7 @@ def render_product_detail(pid, error=None, msg=None):
     if row is None:
         return render_index(error="找不到指定的商品")
     p = dict(row)
-    p["unit_price_str"] = fmt_num(p["unit_price"])
+    p["unit_price_str"] = fmt_money(p["unit_price"])
     images = db.execute(
         "SELECT * FROM product_images WHERE product_id = ? ORDER BY id", (pid,)).fetchall()
     aliases = db.execute(
@@ -994,8 +1145,18 @@ def render_product_detail(pid, error=None, msg=None):
         SELECT t.*, u.username FROM transactions t JOIN users u ON t.user_id = u.id
         WHERE t.product_id = ? ORDER BY t.id DESC LIMIT 10
     """, (pid,)).fetchall()
+    # 批次庫存(FIFO 順序)+ 庫齡天數
+    now_utc = datetime.now(timezone.utc)
+    lots = []
+    for l in db.execute(
+            "SELECT * FROM lots WHERE product_id = ? ORDER BY received_at, id", (pid,)).fetchall():
+        d = dict(l)
+        received = datetime.strptime(l["received_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        d["age_days"] = (now_utc - received).days
+        d["cost_str"] = fmt_money(l["unit_cost"]) if l["unit_cost"] is not None else "—"
+        lots.append(d)
     return render_page(PAGE_PRODUCT_DETAIL, p=p, images=images, aliases=aliases,
-                       recent_tx=recent_tx, error=error, msg=msg)
+                       recent_tx=recent_tx, lots=lots, error=error, msg=msg)
 
 
 @app.route("/products/<int:pid>")
@@ -1102,15 +1263,26 @@ def parse_stock_form():
         "product_id": request.form.get("product_id", "").strip(),
         "quantity": request.form.get("quantity", "").strip(),
         "note": request.form.get("note", "").strip(),
+        "lot_no": request.form.get("lot_no", "").strip(),
+        "unit_cost": request.form.get("unit_cost", "").strip(),
     }
     if not f["quantity"].isdigit() or int(f["quantity"]) <= 0:
         return f, "數量必須為正整數"
     if not f["product_id"].isdigit():
         return f, "請選擇商品"
+    if f["unit_cost"]:
+        try:
+            f["unit_cost_val"] = float(f["unit_cost"])
+            if f["unit_cost_val"] < 0:
+                raise ValueError
+        except ValueError:
+            return f, "成本單價必須為非負數字"
+    else:
+        f["unit_cost_val"] = None
     return f, None
 
 
-EMPTY_STOCK_FORM = {"product_id": "", "quantity": "", "note": ""}
+EMPTY_STOCK_FORM = {"product_id": "", "quantity": "", "note": "", "lot_no": "", "unit_cost": ""}
 
 
 def stock_done_msg(action):
@@ -1143,13 +1315,27 @@ def stock_in():
                 db.rollback()
                 error = "找不到指定的商品"
             else:
-                db.execute("""
+                ts = now_str()
+                cur = db.execute("""
                     INSERT INTO transactions (product_id, user_id, type, quantity, note, created_at)
                     VALUES (?, ?, 'in', ?, ?, ?)
-                """, (pid, session["user_id"], qty, f["note"], now_str()))
-                db.commit()
-                return redirect(url_for("stock_in", done=pid, qty=qty))
-    return render_page(PAGE_STOCK_FORM, title="入庫登記", f=f,
+                """, (pid, session["user_id"], qty, f["note"], ts))
+                tx_id = cur.lastrowid
+                # 每筆入庫建立一個批次(Lot Tracking);批號未填則自動編號
+                lot_no = f["lot_no"] or f"L{datetime.now(timezone.utc).strftime('%Y%m%d')}-{tx_id}"
+                try:
+                    db.execute("""
+                        INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                                          qty_remaining, unit_cost, note, received_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (pid, tx_id, lot_no, qty, qty, f["unit_cost_val"], f["note"], ts))
+                except sqlite3.IntegrityError:
+                    db.rollback()
+                    error = "此商品已有相同批號,請改用其他批號"
+                else:
+                    db.commit()
+                    return redirect(url_for("stock_in", done=pid, qty=qty))
+    return render_page(PAGE_STOCK_FORM, title="入庫登記", f=f, is_in=True,
                        product_list=product_dropdown(), error=error,
                        msg=stock_done_msg("入庫"))
 
@@ -1178,13 +1364,44 @@ def stock_out():
                     db.rollback()
                     error = f"庫存不足,無法出庫(目前庫存:{row['quantity']},要求出庫:{qty})"
                 else:
-                    db.execute("""
+                    ts = now_str()
+                    cur = db.execute("""
                         INSERT INTO transactions (product_id, user_id, type, quantity, note, created_at)
                         VALUES (?, ?, 'out', ?, ?, ?)
-                    """, (pid, session["user_id"], qty, f["note"], now_str()))
+                    """, (pid, session["user_id"], qty, f["note"], ts))
+                    tx_id = cur.lastrowid
+                    # FIFO 先進先出:自最早入庫的批次依序扣減,並記錄消耗明細供追溯
+                    remaining = qty
+                    lots_fifo = db.execute("""
+                        SELECT id, qty_remaining FROM lots
+                        WHERE product_id = ? AND qty_remaining > 0
+                        ORDER BY received_at, id
+                    """, (pid,)).fetchall()
+                    for lot in lots_fifo:
+                        if remaining <= 0:
+                            break
+                        take = min(lot["qty_remaining"], remaining)
+                        db.execute("UPDATE lots SET qty_remaining = qty_remaining - ? WHERE id = ?",
+                                   (take, lot["id"]))
+                        db.execute("""
+                            INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
+                            VALUES (?, ?, ?)
+                        """, (tx_id, lot["id"], take))
+                        remaining -= take
+                    if remaining > 0:
+                        # 防禦:批次帳有缺口時建調整批補齊(正常流程不會發生)
+                        cur2 = db.execute("""
+                            INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                                              qty_remaining, note, received_at)
+                            VALUES (?, ?, ?, ?, 0, '缺口調整批', ?)
+                        """, (pid, tx_id, f"ADJ-{tx_id}", remaining, ts))
+                        db.execute("""
+                            INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
+                            VALUES (?, ?, ?)
+                        """, (tx_id, cur2.lastrowid, remaining))
                     db.commit()
                     return redirect(url_for("stock_out", done=pid, qty=qty))
-    return render_page(PAGE_STOCK_FORM, title="出庫登記", f=f,
+    return render_page(PAGE_STOCK_FORM, title="出庫登記", f=f, is_in=False,
                        product_list=product_dropdown(), error=error,
                        msg=stock_done_msg("出庫"))
 
@@ -1203,8 +1420,15 @@ def history_filters():
 
 
 def query_transactions(filters):
+    # lot_info:入庫顯示建立的批號;出庫顯示 FIFO 消耗明細(批號×數量)
     sql = """
-        SELECT t.*, p.name AS product_name, p.sku, p.unit, u.username
+        SELECT t.*, p.name AS product_name, p.sku, p.unit, u.username,
+               CASE WHEN t.type = 'in'
+                    THEN (SELECT l.lot_no FROM lots l WHERE l.transaction_id = t.id)
+                    ELSE (SELECT GROUP_CONCAT(l2.lot_no || '×' || c.quantity, '、')
+                          FROM lot_consumptions c JOIN lots l2 ON c.lot_id = l2.id
+                          WHERE c.transaction_id = t.id)
+               END AS lot_info
         FROM transactions t
         JOIN products p ON t.product_id = p.id
         JOIN users u ON t.user_id = u.id
@@ -1332,7 +1556,8 @@ def report():
     if end:
         cond += " AND t.created_at <= ?"
         params.append(end + " 23:59:59")
-    rows = [dict(r) for r in get_db().execute(f"""
+    db = get_db()
+    rows = [dict(r) for r in db.execute(f"""
         SELECT p.id, p.sku, p.name, p.quantity, p.unit_price,
                COALESCE(SUM(CASE WHEN t.type = 'in'  THEN t.quantity END), 0) AS total_in,
                COALESCE(SUM(CASE WHEN t.type = 'out' THEN t.quantity END), 0) AS total_out
@@ -1340,18 +1565,51 @@ def report():
         LEFT JOIN transactions t ON t.product_id = p.id {cond}
         GROUP BY p.id ORDER BY p.id
     """, params).fetchall()]
+    # 加權平均成本(存貨計價):僅以尚有剩餘且有登記成本的批次計算
+    avg_costs = {r["product_id"]: r for r in db.execute("""
+        SELECT product_id,
+               SUM(qty_remaining * unit_cost) * 1.0 / SUM(qty_remaining) AS avg_cost
+        FROM lots WHERE qty_remaining > 0 AND unit_cost IS NOT NULL
+        GROUP BY product_id
+    """).fetchall()}
     for r in rows:
         r["net"] = r["total_in"] - r["total_out"]
         r["value"] = r["quantity"] * r["unit_price"]
-        r["unit_price_str"] = fmt_num(r["unit_price"])
-        r["value_str"] = fmt_num(r["value"])
+        r["unit_price_str"] = fmt_money(r["unit_price"])
+        r["value_str"] = fmt_money(r["value"])
+        ac = avg_costs.get(r["id"])
+        r["avg_cost_str"] = fmt_money(ac["avg_cost"]) if ac else "—"
+    # ABC 分析(柏拉圖法則):依庫存價值累積占比分級,A ≤80%、B ≤95%、其餘 C
+    total_value = sum(r["value"] for r in rows)
+    abc_rows = sorted(rows, key=lambda r: r["value"], reverse=True)
+    cum = 0.0
+    for r in abc_rows:
+        cum += r["value"]
+        cum_pct = (cum / total_value * 100) if total_value > 0 else 100.0
+        r["pct_str"] = fmt_num(r["value"] / total_value * 100) if total_value > 0 else "0"
+        r["cum_pct_str"] = fmt_num(cum_pct)
+        r["abc"] = "A" if cum_pct <= 80 else ("B" if cum_pct <= 95 else "C")
+    # 庫齡分析(Inventory Aging):在庫批次依庫齡分桶
+    now_utc = datetime.now(timezone.utc)
+    buckets = [["0-30 天", 0, 30, 0], ["31-60 天", 31, 60, 0], ["61-90 天", 61, 90, 0], ["90 天以上", 91, None, 0]]
+    for l in db.execute("SELECT qty_remaining, received_at FROM lots WHERE qty_remaining > 0").fetchall():
+        received = datetime.strptime(l["received_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        age = (now_utc - received).days
+        for b in buckets:
+            if age >= b[1] and (b[2] is None or age <= b[2]):
+                b[3] += l["qty_remaining"]
+                break
+    aging_total = sum(b[3] for b in buckets)
+    aging = [{"label": b[0], "qty": b[3],
+              "pct_str": fmt_num(b[3] / aging_total * 100) if aging_total > 0 else "0"} for b in buckets]
     return render_page(
         PAGE_REPORT, rows=rows, start=start, end=end,
+        abc_rows=abc_rows, aging=aging,
         total_in=sum(r["total_in"] for r in rows),
         total_out=sum(r["total_out"] for r in rows),
         total_net=sum(r["net"] for r in rows),
         total_qty=sum(r["quantity"] for r in rows),
-        total_value_str=fmt_num(sum(r["value"] for r in rows)),
+        total_value_str=fmt_money(total_value),
     )
 
 
@@ -1451,17 +1709,24 @@ def import_products_rows(rows):
                     "INSERT INTO suppliers (name, created_at) VALUES (?, ?)",
                     (supplier_name, now_str()))
                 supplier_id = cur.lastrowid
+        ts = now_str()
         cur = db.execute("""
             INSERT INTO products (name, sku, category, unit, unit_price,
                                   low_stock_threshold, quantity, supplier_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, sku, category, unit or "個", price, threshold, init_qty,
-              supplier_id, now_str()))
-        if init_qty > 0:  # 初始庫存寫成入庫異動,維持歷史一致
-            db.execute("""
+              supplier_id, ts))
+        new_pid = cur.lastrowid
+        if init_qty > 0:  # 初始庫存寫成入庫異動 + 建立批次,維持歷史與批次帳一致
+            tcur = db.execute("""
                 INSERT INTO transactions (product_id, user_id, type, quantity, note, created_at)
                 VALUES (?, ?, 'in', ?, 'CSV匯入', ?)
-            """, (cur.lastrowid, session["user_id"], init_qty, now_str()))
+            """, (new_pid, session["user_id"], init_qty, ts))
+            db.execute("""
+                INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                                  qty_remaining, note, received_at)
+                VALUES (?, ?, ?, ?, ?, 'CSV匯入', ?)
+            """, (new_pid, tcur.lastrowid, f"IMP-{tcur.lastrowid}", init_qty, init_qty, ts))
         ok += 1
         report.append({"line": line_no, "label": label, "status": "成功"})
     db.commit()
@@ -1560,11 +1825,12 @@ def export_inventory():
 def export_transactions():
     rows = query_transactions(history_filters())
     data = [(r["created_at"], "入庫" if r["type"] == "in" else "出庫", r["sku"],
-             r["product_name"], r["quantity"], r["unit"], r["note"], r["username"])
+             r["product_name"], r["quantity"], r["unit"], r["lot_info"] or "",
+             r["note"], r["username"])
             for r in rows]
     filename = f"transactions_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
     return csv_response(
-        ["時間(UTC)", "類型", "SKU", "商品名稱", "數量", "單位", "備註", "操作人員"],
+        ["時間(UTC)", "類型", "SKU", "商品名稱", "數量", "單位", "批次", "備註", "操作人員"],
         data, filename)
 
 
