@@ -13,6 +13,8 @@ description: 逐項對照 REQUIREMENTS.md 實測驗收,循環修正直到全部�
    - 庫存管理系統(每輪都要先清掉測試 DB 與照片目錄取得乾淨狀態):
      `rm -rf /tmp/verify_inventory.db* /tmp/inv_cookies.txt /tmp/verify_inventory_images /tmp/backups /tmp/secret_key.txt && INVENTORY_DB=/tmp/verify_inventory.db INVENTORY_IMAGES=/tmp/verify_inventory_images PORT=5002 python inventory_app.py`
    - 部分第四階段條目需要額外實例(ALLOWED_IPS 白名單用 PORT=5004),測畢務必 kill。
+   - 第五階段(盤點/預留/規劃)條目接續同一測試序列;中文的 query 參數(如 `purpose=盤點調整`)
+     必須用 `curl --get --data-urlencode`,直接塞進 URL 會查不到。
 
    等待 2 秒後確認兩個 port 皆可連線。
 

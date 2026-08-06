@@ -299,7 +299,7 @@ class TestPermissions(unittest.TestCase):
         app_module.app.config["TESTING"] = True
         cls.admin = app_module.app.test_client()
         cls.admin.post("/login", data={"username": "admin", "password": "admin12345"})
-        # 由管理員建立一般使用者
+        # 由管理員建立一般使用者(可能已由其他測試類別建立,重複呼叫無副作用)
         cls.admin.post("/users/new", data={"username": "staff1", "password": "staff12345"})
         cls.staff = app_module.app.test_client()
         cls.staff.post("/login", data={"username": "staff1", "password": "staff12345"})
@@ -371,6 +371,333 @@ class TestAuditAndTime(InventoryTestBase):
         # 台灣 1/2 00:00 = UTC 1/1 16:00;台灣 1/2 23:59:59 = UTC 1/2 15:59:59
         self.assertEqual(start_utc, "2026-01-01 16:00:00")
         self.assertEqual(end_utc, "2026-01-02 15:59:59")
+
+
+class TestCycleCount(InventoryTestBase):
+    """循環盤點:帳實相符的核心機制,過帳必須同時修正庫存與批次帳"""
+
+    def _new_count(self, name, scope="all"):
+        self.client.post("/counts/new", data={"name": name, "scope": scope})
+        with self.db() as conn:
+            return conn.execute("SELECT id FROM stock_counts WHERE name = ?", (name,)).fetchone()["id"]
+
+    def test_count_creation_snapshots_system_qty(self):
+        pid = self.new_product("CNT-A")
+        self.stock_in(pid, 40)
+        cid = self._new_count("盤點-A")
+        with self.db() as conn:
+            row = conn.execute("""
+                SELECT system_qty FROM stock_count_items WHERE count_id = ? AND product_id = ?
+            """, (cid, pid)).fetchone()
+        self.assertEqual(row["system_qty"], 40, "建單當下就該固定系統帳作為比較基準")
+
+    def test_post_shortage_fixes_stock_and_lot_ledger(self):
+        pid = self.new_product("CNT-B")
+        self.stock_in(pid, 50)
+        cid = self._new_count("盤點-B")
+        self.client.post(f"/counts/{cid}/count",
+                         data={"product_id": str(pid), "counted_qty": "47", "note": "領用未登記"})
+        self.client.post(f"/counts/{cid}/post")
+        with self.db() as conn:
+            qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+            tx = conn.execute("""
+                SELECT type, quantity FROM transactions
+                WHERE product_id = ? AND purpose = '盤點調整'
+            """, (pid,)).fetchone()
+        self.assertEqual(qty, 47, "過帳後庫存必須等於實盤數")
+        self.assertEqual((tx["type"], tx["quantity"]), ("out", 3), "盤虧應產生一筆出庫調整")
+        self.assert_lot_ledger_balanced()
+
+    def test_post_overage_creates_adjustment_lot(self):
+        pid = self.new_product("CNT-C")
+        self.stock_in(pid, 10)
+        cid = self._new_count("盤點-C")
+        self.client.post(f"/counts/{cid}/count", data={"product_id": str(pid), "counted_qty": "14"})
+        self.client.post(f"/counts/{cid}/post")
+        with self.db() as conn:
+            qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+            lots = conn.execute(
+                "SELECT COUNT(*) FROM lots WHERE product_id = ? AND note = '盤盈調整批'",
+                (pid,)).fetchone()[0]
+        self.assertEqual(qty, 14)
+        self.assertEqual(lots, 1, "盤盈必須建立調整批,否則批次帳會短少")
+        self.assert_lot_ledger_balanced()
+
+    def test_accuracy_recorded_and_no_double_post(self):
+        a = self.new_product("CNT-D1")
+        b = self.new_product("CNT-D2")
+        self.stock_in(a, 10)
+        self.stock_in(b, 10)
+        cid = self._new_count("盤點-D")
+        self.client.post(f"/counts/{cid}/count", data={"product_id": str(a), "counted_qty": "10"})
+        self.client.post(f"/counts/{cid}/count", data={"product_id": str(b), "counted_qty": "8"})
+        self.client.post(f"/counts/{cid}/post")
+        with self.db() as conn:
+            acc = conn.execute("SELECT accuracy FROM stock_counts WHERE id = ?", (cid,)).fetchone()[0]
+        self.assertAlmostEqual(acc, 50.0, places=1, msg="2 項盤點 1 項相符 → 準確率 50%")
+        resp = self.client.post(f"/counts/{cid}/post")
+        self.assertIn("已過帳", resp.get_data(as_text=True))
+
+    def test_post_uses_current_qty_not_snapshot(self):
+        """建單後若又有進出,過帳必須以當下庫存為準,不能把期間異動蓋掉。"""
+        pid = self.new_product("CNT-E")
+        self.stock_in(pid, 20)
+        cid = self._new_count("盤點-E")
+        self.stock_in(pid, 5)          # 建單後又入庫 → 現在是 25
+        self.client.post(f"/counts/{cid}/count", data={"product_id": str(pid), "counted_qty": "25"})
+        self.client.post(f"/counts/{cid}/post")
+        with self.db() as conn:
+            qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+        self.assertEqual(qty, 25)
+        self.assert_lot_ledger_balanced()
+
+
+class TestReservations(InventoryTestBase):
+    """預留與可用量:業界的 on-hand vs available 區分"""
+
+    def test_reservation_reduces_available_not_onhand(self):
+        pid = self.new_product("RSV-A")
+        self.stock_in(pid, 30)
+        self.client.post("/reservations/new",
+                         data={"product_id": str(pid), "quantity": "12", "purpose": "WO-1"})
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn(f'id="qty-{pid}">30<', html, "現貨量不受預留影響")
+        self.assertIn(f'id="avail-{pid}">18', html, "可用量 = 現貨 − 預留")
+
+    def test_reservation_cannot_exceed_available(self):
+        pid = self.new_product("RSV-B")
+        self.stock_in(pid, 10)
+        resp = self.client.post("/reservations/new",
+                                data={"product_id": str(pid), "quantity": "999"})
+        self.assertIn("可用量不足", resp.get_data(as_text=True))
+        with self.db() as conn:
+            n = conn.execute("SELECT COUNT(*) FROM reservations WHERE product_id = ?",
+                             (pid,)).fetchone()[0]
+        self.assertEqual(n, 0)
+
+    def test_release_restores_available(self):
+        pid = self.new_product("RSV-C")
+        self.stock_in(pid, 20)
+        self.client.post("/reservations/new", data={"product_id": str(pid), "quantity": "5"})
+        with self.db() as conn:
+            rid = conn.execute(
+                "SELECT id FROM reservations WHERE product_id = ? AND status='active'",
+                (pid,)).fetchone()[0]
+        self.client.post(f"/reservations/{rid}/release")
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn(f'id="avail-{pid}">20', html)
+
+
+class TestUomAndFefo(InventoryTestBase):
+    """單位換算與 FEFO 出庫策略"""
+
+    def test_purchase_unit_conversion(self):
+        self.client.post("/products/new", data={
+            "name": "螺絲箱裝", "sku": "UOM-A", "unit_price": "1", "low_stock_threshold": "0",
+            "unit": "個", "purchase_unit": "箱", "units_per_purchase": "100",
+            "lead_time_days": "7", "service_level": "95", "issue_strategy": "FIFO"})
+        with self.db() as conn:
+            pid = conn.execute("SELECT id FROM products WHERE sku='UOM-A'").fetchone()[0]
+        self.client.post("/stock/in", data={
+            "product_id": str(pid), "quantity": "3", "qty_unit": "purchase"})
+        with self.db() as conn:
+            qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+            tx = conn.execute("SELECT quantity FROM transactions WHERE product_id = ?",
+                              (pid,)).fetchone()[0]
+        self.assertEqual(qty, 300, "3 箱 × 100 = 300 個")
+        self.assertEqual(tx, 300, "異動也應記錄換算後的庫存單位數量")
+
+    def test_purchase_unit_requires_setup(self):
+        pid = self.new_product("UOM-B")   # 未設採購單位
+        resp = self.client.post("/stock/in", data={
+            "product_id": str(pid), "quantity": "2", "qty_unit": "purchase"})
+        self.assertIn("尚未設定採購單位", resp.get_data(as_text=True))
+
+    def test_fefo_consumes_earliest_expiry_first(self):
+        self.client.post("/products/new", data={
+            "name": "效期料", "sku": "FEFO-A", "unit_price": "1", "low_stock_threshold": "0",
+            "units_per_purchase": "1", "lead_time_days": "7", "service_level": "95",
+            "issue_strategy": "FEFO"})
+        with self.db() as conn:
+            pid = conn.execute("SELECT id FROM products WHERE sku='FEFO-A'").fetchone()[0]
+        # 先入效期「晚」的批,再入效期「早」的批 —— FIFO 會扣錯,FEFO 才會扣對
+        self.client.post("/stock/in", data={"product_id": str(pid), "quantity": "10",
+                                            "lot_no": "LATE", "expiry_date": "2030-12-31"})
+        self.client.post("/stock/in", data={"product_id": str(pid), "quantity": "10",
+                                            "lot_no": "EARLY", "expiry_date": "2027-01-01"})
+        self.stock_out(pid, 10)
+        with self.db() as conn:
+            remain = dict(conn.execute(
+                "SELECT lot_no, qty_remaining FROM lots WHERE product_id = ?", (pid,)).fetchall())
+        self.assertEqual(remain, {"EARLY": 0, "LATE": 10}, "FEFO 應先消耗最早到期的批")
+        self.assert_lot_ledger_balanced()
+
+    def test_expiring_lots_appear_in_alerts(self):
+        soon = (app_module.today_local() + __import__("datetime").timedelta(days=10)).isoformat()
+        self.client.post("/products/new", data={
+            "name": "快到期料", "sku": "EXPIRE-A", "unit_price": "1", "low_stock_threshold": "0",
+            "units_per_purchase": "1", "lead_time_days": "7", "service_level": "95"})
+        with self.db() as conn:
+            pid = conn.execute("SELECT id FROM products WHERE sku='EXPIRE-A'").fetchone()[0]
+        self.client.post("/stock/in", data={"product_id": str(pid), "quantity": "5",
+                                            "lot_no": "SOONLOT", "expiry_date": soon})
+        html = self.client.get("/alerts").get_data(as_text=True)
+        self.assertIn("效期警示", html)
+        self.assertIn("SOONLOT", html)
+
+
+class TestPlanning(InventoryTestBase):
+    """安全庫存推導:把門檻從猜測變成由變異推導"""
+
+    def _seed_usage(self, pid, quantities):
+        """直接寫入跨日出庫紀錄,製造可計算的用量變異。"""
+        from datetime import timedelta as _td
+        now = __import__("datetime").datetime.now(app_module.timezone.utc)
+        with self.db() as conn:
+            for i, q in enumerate(quantities):
+                if q <= 0:
+                    continue   # transactions 有 quantity > 0 的 CHECK;沒出庫的日子本來就不該有紀錄
+                ts = (now - _td(days=i)).strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute("""
+                    INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at)
+                    VALUES (?, 1, 'out', ?, '', '', ?)
+                """, (pid, q, ts))
+            conn.commit()
+
+    def test_safety_stock_formula(self):
+        pid = self.new_product("PLAN-A")
+        self.stock_in(pid, 500)
+        self._seed_usage(pid, [5, 0, 12, 3, 0, 20, 8, 1, 15, 4])
+        with app_module.app.test_request_context():
+            pass
+        html = self.client.get("/planning").get_data(as_text=True)
+        self.assertIn("建議安全庫存", html)
+        # 直接驗算公式:SS = Z × σ × √L,四捨五入取進位
+        with app_module.app.test_client() as c:
+            c.post("/login", data={"username": "admin", "password": "admin12345"})
+        with app_module.app.test_request_context():
+            app_module.g.db = None
+        # 以模組函式直接驗證(不經 HTTP),避免頁面格式影響判斷
+        with app_module.app.test_request_context():
+            app_module.g.pop("db", None)
+            stats = app_module.usage_stats(pid)
+            prod = self.db().execute("SELECT * FROM products WHERE id = ?", (pid,)).fetchone()
+            ss, rop = app_module.suggest_safety_stock(prod, stats)
+        expected = math_ceil(1.65 * stats["sd"] * (prod["lead_time_days"] ** 0.5))
+        self.assertEqual(ss, expected, "安全庫存應等於 Z × 標準差 × √前置期(進位)")
+        self.assertGreater(rop, ss, "再訂購點必須大於安全庫存(還要涵蓋前置期內的用量)")
+
+    def test_longer_lead_time_raises_suggestion(self):
+        pid = self.new_product("PLAN-B")
+        self.stock_in(pid, 500)
+        self._seed_usage(pid, [4, 9, 1, 14, 2, 7, 11])
+        with app_module.app.test_request_context():
+            app_module.g.pop("db", None)
+            prod = dict(self.db().execute("SELECT * FROM products WHERE id = ?", (pid,)).fetchone())
+            stats = app_module.usage_stats(pid)
+            prod["lead_time_days"] = 7
+            ss7, _ = app_module.suggest_safety_stock(prod, stats)
+            prod["lead_time_days"] = 28
+            ss28, _ = app_module.suggest_safety_stock(prod, stats)
+        self.assertGreater(ss28, ss7, "前置期越長,需要的安全庫存越多")
+
+    def test_apply_updates_thresholds(self):
+        pid = self.new_product("PLAN-C")
+        self.stock_in(pid, 500)
+        self._seed_usage(pid, [6, 2, 18, 1, 9])
+        self.client.post("/planning/apply")
+        with self.db() as conn:
+            th = conn.execute("SELECT low_stock_threshold FROM products WHERE id = ?",
+                              (pid,)).fetchone()[0]
+        self.assertGreater(th, 0, "套用後門檻應為推導出的正數")
+
+    def test_xyz_classification(self):
+        # 穩定用量 → X;劇烈波動 → Z
+        steady = {"mean": 10.0, "sd": 2.0, "total": 0, "days": 30}    # CV = 0.2
+        volatile = {"mean": 5.0, "sd": 9.0, "total": 0, "days": 30}   # CV = 1.8
+        self.assertEqual(app_module.xyz_class(steady)[0], "X")
+        self.assertEqual(app_module.xyz_class(volatile)[0], "Z")
+        self.assertEqual(app_module.xyz_class(None)[0], "—")
+
+
+class TestLocationAndQr(InventoryTestBase):
+    """儲位與 QR 標籤"""
+
+    def test_location_is_searchable(self):
+        self.client.post("/products/new", data={
+            "name": "儲位料", "sku": "LOC-A", "unit_price": "1", "low_stock_threshold": "0",
+            "location": "A-03-2", "units_per_purchase": "1", "lead_time_days": "7",
+            "service_level": "95"})
+        html = self.client.get("/?q=A-03-2").get_data(as_text=True)
+        self.assertIn("LOC-A", html, "應可用儲位搜尋到商品")
+
+    def test_qr_endpoint_returns_png(self):
+        pid = self.new_product("QR-A")
+        resp = self.client.get(f"/products/{pid}/qr.png")
+        if not app_module.HAS_QRCODE:
+            self.skipTest("未安裝 qrcode 套件")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, "image/png")
+        self.assertTrue(resp.get_data().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_labels_page_lists_products(self):
+        pid = self.new_product("LBL-A")
+        html = self.client.get("/labels").get_data(as_text=True)
+        self.assertIn("LBL-A", html)
+
+
+class TestPurposeTracking(InventoryTestBase):
+    """領用歸屬:結構化的用途欄位而非自由備註"""
+
+    def test_purpose_recorded_and_filterable(self):
+        pid = self.new_product("PUR-A")
+        self.stock_in(pid, 20)
+        self.client.post("/stock/out", data={
+            "product_id": str(pid), "quantity": "3", "purpose": "WO-1001"})
+        self.client.post("/stock/out", data={
+            "product_id": str(pid), "quantity": "2", "purpose": "WO-2002"})
+        html = self.client.get("/history?purpose=WO-1001").get_data(as_text=True)
+        self.assertIn("WO-1001", html)
+        self.assertNotIn("WO-2002", html, "篩選後不應出現其他用途的紀錄")
+
+
+class TestCountPermissions(unittest.TestCase):
+    """盤點的權限界線:現場人員可盤、只有管理員能過帳"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = os.environ["INVENTORY_DB"]
+        app_module.app.config["TESTING"] = True
+        cls.admin = app_module.app.test_client()
+        cls.admin.post("/login", data={"username": "admin", "password": "admin12345"})
+        # 測試類別的執行順序不保證,這裡自行確保 staff1 存在(已存在則此呼叫無副作用)
+        cls.admin.post("/users/new", data={"username": "staff1", "password": "staff12345"})
+        cls.staff = app_module.app.test_client()
+        cls.staff.post("/login", data={"username": "staff1", "password": "staff12345"})
+
+    def test_staff_can_record_but_not_post(self):
+        self.admin.post("/counts/new", data={"name": "權限盤點", "scope": "all"})
+        with sqlite3.connect(self.db_path) as conn:
+            cid = conn.execute(
+                "SELECT id FROM stock_counts WHERE name='權限盤點'").fetchone()[0]
+            pid = conn.execute("SELECT product_id FROM stock_count_items WHERE count_id=? LIMIT 1",
+                               (cid,)).fetchone()[0]
+        self.assertEqual(
+            self.staff.post(f"/counts/{cid}/count",
+                            data={"product_id": str(pid), "counted_qty": "1"}).status_code, 302,
+            "現場人員應可記錄實盤數")
+        self.assertEqual(self.staff.post(f"/counts/{cid}/post").status_code, 403,
+                         "只有管理員能過帳")
+
+    def test_staff_cannot_create_count(self):
+        self.assertEqual(
+            self.staff.post("/counts/new", data={"name": "不該建成", "scope": "all"}).status_code,
+            403)
+
+
+def math_ceil(x):
+    import math as _m
+    return _m.ceil(x)
 
 
 class TestSecurityConfig(unittest.TestCase):

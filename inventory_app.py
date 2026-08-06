@@ -29,6 +29,13 @@ try:
 except ImportError:
     HAS_PIL = False
 
+# qrcode 供料架標籤使用;同樣採優雅停用
+try:
+    import qrcode
+    HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
+
 app = Flask(__name__)
 
 # 資料庫路徑可用環境變數覆蓋,驗收測試用 /tmp 下的乾淨 DB
@@ -238,11 +245,61 @@ def init_db():
             created_at  TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+        -- 預留:現貨量之外的第二個數字,可用量 = 現貨 − 有效預留
+        CREATE TABLE IF NOT EXISTS reservations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            quantity    INTEGER NOT NULL CHECK (quantity > 0),
+            purpose     TEXT DEFAULT '',
+            username    TEXT DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','released')),
+            created_at  TEXT NOT NULL,
+            released_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_resv_product ON reservations(product_id, status);
+        -- 循環盤點:盤點單 + 逐項實盤數,過帳後產生調整異動修正帳
+        CREATE TABLE IF NOT EXISTS stock_counts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            scope      TEXT DEFAULT '',
+            status     TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','posted')),
+            username   TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            posted_at  TEXT DEFAULT '',
+            accuracy   REAL
+        );
+        CREATE TABLE IF NOT EXISTS stock_count_items (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            count_id    INTEGER NOT NULL REFERENCES stock_counts(id) ON DELETE CASCADE,
+            product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            system_qty  INTEGER NOT NULL DEFAULT 0,
+            counted_qty INTEGER,
+            note        TEXT DEFAULT '',
+            counted_at  TEXT DEFAULT '',
+            UNIQUE(count_id, product_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sci_count ON stock_count_items(count_id);
     """)
+    # 既有資料庫的欄位擴充(SQLite 的 ADD COLUMN 重複執行會報錯,故先檢查)
+    ensure_column(conn, "products", "location", "TEXT DEFAULT ''")
+    ensure_column(conn, "products", "purchase_unit", "TEXT DEFAULT ''")
+    ensure_column(conn, "products", "units_per_purchase", "INTEGER DEFAULT 1")
+    ensure_column(conn, "products", "lead_time_days", "INTEGER DEFAULT 7")
+    ensure_column(conn, "products", "service_level", "REAL DEFAULT 95")
+    ensure_column(conn, "products", "issue_strategy", "TEXT DEFAULT 'FIFO'")
+    ensure_column(conn, "lots", "expiry_date", "TEXT DEFAULT ''")
+    ensure_column(conn, "transactions", "purpose", "TEXT DEFAULT ''")
     conn.commit()
     conn.close()
     os.makedirs(IMAGE_DIR, exist_ok=True)
     reconcile_lots()
+
+
+def ensure_column(conn, table, column, decl):
+    # 冪等地新增欄位:舊資料庫升級時自動補上,已存在則略過
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def audit(action, target_type="", target_id="", detail=""):
@@ -387,6 +444,140 @@ def safe_int(value, default=None):
         return default
 
 
+def today_local():
+    return datetime.now(LOCAL_TZ).date()
+
+
+# ---------------------------------------------------------------------------
+# 存貨規劃:安全庫存推導、XYZ 分級
+# 業界系統不讓使用者憑印象填低庫存門檻,而是由用量變異、前置期與目標服務水準推導。
+# ---------------------------------------------------------------------------
+
+# 服務水準對應的常態分位數 Z(業界常用檔位)
+Z_TABLE = {80: 0.84, 85: 1.04, 90: 1.28, 95: 1.65, 97: 1.88, 98: 2.05, 99: 2.33}
+
+USAGE_WINDOW_DAYS = 90   # 統計用量的回溯天數
+
+
+def z_for_service_level(level):
+    # 取最接近的檔位,避免使用者填了非標準值就算不出來
+    try:
+        lv = float(level)
+    except (TypeError, ValueError):
+        lv = 95.0
+    return Z_TABLE[min(Z_TABLE, key=lambda k: abs(k - lv))]
+
+
+def usage_stats(product_id, window_days=USAGE_WINDOW_DAYS):
+    """回傳期間內的日用量平均與標準差(只看出庫,那才是真正的消耗)。"""
+    since = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%d %H:%M:%S")
+    rows = get_db().execute("""
+        SELECT created_at, quantity FROM transactions
+        WHERE product_id = ? AND type = 'out' AND created_at >= ?
+    """, (product_id, since)).fetchall()
+    if not rows:
+        return None
+    # 先彙總成每日用量,沒有出庫的日子算 0(否則會嚴重高估日均)
+    per_day = {}
+    for r in rows:
+        day = r["created_at"][:10]
+        per_day[day] = per_day.get(day, 0) + r["quantity"]
+    series = [per_day.get(
+        (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d"), 0)
+        for i in range(window_days)]
+    n = len(series)
+    mean = sum(series) / n
+    var = sum((x - mean) ** 2 for x in series) / n
+    return {"mean": mean, "sd": math.sqrt(var), "total": sum(series), "days": n}
+
+
+def suggest_safety_stock(product, stats):
+    """SS = Z × σ_d × √L(僅需求變異版本;前置期變異未知時的標準做法)。
+    回傳 (建議安全庫存, 再訂購點) — 皆無條件進位為整數,寧多勿少。"""
+    if not stats or stats["mean"] <= 0:
+        return None, None
+    lead = max(1, product["lead_time_days"] or 7)
+    z = z_for_service_level(product["service_level"])
+    ss = z * stats["sd"] * math.sqrt(lead)
+    rop = stats["mean"] * lead + ss
+    return math.ceil(ss), math.ceil(rop)
+
+
+def xyz_class(stats):
+    """依變異係數 CV 分級:X 穩定、Y 中等、Z 高度波動(業界常用門檻 0.5 / 1.0)。"""
+    if not stats or stats["mean"] <= 0:
+        return "—", None
+    cv = stats["sd"] / stats["mean"]
+    return ("X" if cv < 0.5 else "Y" if cv < 1.0 else "Z"), cv
+
+
+# ---------------------------------------------------------------------------
+# 預留:可用量 = 現貨 − 有效預留(業界的 on-hand vs available 區分)
+# ---------------------------------------------------------------------------
+
+def reserved_map():
+    return {r["product_id"]: r["qty"] for r in get_db().execute("""
+        SELECT product_id, SUM(quantity) AS qty FROM reservations
+        WHERE status = 'active' GROUP BY product_id
+    """).fetchall()}
+
+
+def reserved_qty(product_id):
+    row = get_db().execute("""
+        SELECT COALESCE(SUM(quantity), 0) AS qty FROM reservations
+        WHERE product_id = ? AND status = 'active'
+    """, (product_id,)).fetchone()
+    return row["qty"]
+
+
+# ---------------------------------------------------------------------------
+# 批次消耗:FIFO / FEFO(出庫與盤虧調整共用,確保批次帳恆等式在兩條路徑都成立)
+# ---------------------------------------------------------------------------
+
+def consume_lots(db, pid, qty, tx_id, ts):
+    """依商品的出庫策略消耗批次並記錄追溯明細。
+    FIFO = 先進先出(依入庫時間);FEFO = 先到期先出(依有效期,無效期者排最後)。"""
+    strategy = (db.execute("SELECT issue_strategy FROM products WHERE id = ?",
+                           (pid,)).fetchone() or {"issue_strategy": "FIFO"})["issue_strategy"]
+    if strategy == "FEFO":
+        # 有效期空字串排最後,同效期再依入庫順序
+        order = "CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date, received_at, id"
+    else:
+        order = "received_at, id"
+    remaining = qty
+    lots = db.execute(f"""
+        SELECT id, qty_remaining FROM lots
+        WHERE product_id = ? AND qty_remaining > 0
+        ORDER BY {order}
+    """, (pid,)).fetchall()
+    for lot in lots:
+        if remaining <= 0:
+            break
+        take = min(lot["qty_remaining"], remaining)
+        db.execute("UPDATE lots SET qty_remaining = qty_remaining - ? WHERE id = ?",
+                   (take, lot["id"]))
+        db.execute("""
+            INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
+            VALUES (?, ?, ?)
+        """, (tx_id, lot["id"], take))
+        remaining -= take
+    if remaining > 0:
+        # 防禦:批次帳有缺口時建調整批補齊(正常流程不會發生)
+        cur = db.execute("""
+            INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                              qty_remaining, note, received_at)
+            VALUES (?, ?, ?, ?, 0, '缺口調整批', ?)
+        """, (pid, tx_id, f"ADJ-{tx_id}", remaining, ts))
+        db.execute("""
+            INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
+            VALUES (?, ?, ?)
+        """, (tx_id, cur.lastrowid, remaining))
+        # 正常流程不該走到這裡:留下明確告警供人工稽核,不靜默吸收
+        audit("批次帳異常", "商品", pid,
+              f"消耗 {qty} 時批次剩餘不足 {remaining},已建立缺口調整批 ADJ-{tx_id}")
+        print(f"[警告] 商品 {pid} 批次帳出現缺口 {remaining},已記錄稽核軌跡")
+
+
 def fmt_num(value):
     # 數字(無千分位):整數不帶小數點,小數去尾零(125.0 → 125、25.5 → 25.5)
     # 用於表單值與 CSV(千分位會讓 float() 與 Excel 數值欄位解析失敗)
@@ -472,6 +663,48 @@ LAYOUT = """
         .banner a { display: inline-block; padding: 4px 0; }
         .note { color: #64748b; font-size: 13px; }
         .pager { margin-top: 14px; font-size: 14px; }
+        /* 第五階段:盤點、預留、規劃、標籤 */
+        .loc-cell { font-family: ui-monospace, monospace; font-size: 13px; color: #334155; white-space: nowrap; }
+        .resv-note { font-size: 11px; color: #b45309; font-weight: 600; white-space: nowrap; }
+        .chip-open { background: #fef3c7; color: #92400e; font-size: 12px; font-weight: 700;
+                     padding: 2px 9px; border-radius: 999px; }
+        .chip-posted { background: #dcfce7; color: #15803d; font-size: 12px; font-weight: 700;
+                       padding: 2px 9px; border-radius: 999px; }
+        tr.has-diff td { background: #fffbeb; }
+        @media (prefers-color-scheme: dark) {
+            .loc-cell { color: #cbd5e1; }
+            .stat-box { background: #1e293b; border-color: #334155; }
+            .stat-num { color: #f1f5f9; }
+            .stat-cap { color: #94a3b8; }
+            tr.has-diff td { background: #292417; }
+            .label, .qr-img { background: #fff; }
+        }
+        .stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 18px; }
+        .stat-box { flex: 1 1 130px; background: #f8fafc; border: 1px solid #e2e8f0;
+                    border-radius: 10px; padding: 12px 16px; }
+        .stat-num { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums;
+                    letter-spacing: -.02em; color: #0f172a; }
+        .stat-cap { font-size: 12.5px; color: #64748b; margin-top: 2px; }
+        .count-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .count-input { width: 90px !important; margin-top: 0 !important; text-align: right; }
+        .count-note { width: 130px !important; margin-top: 0 !important; font-size: 13px; }
+        .qr-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 16px 0 4px; }
+        .qr-img { width: 120px; height: 120px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+        .qr-cap { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+        .label-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+        .label { display: flex; gap: 10px; align-items: center; border: 1px solid #cbd5e1;
+                 border-radius: 8px; padding: 10px; background: #fff; break-inside: avoid; }
+        .label img { width: 84px; height: 84px; flex-shrink: 0; }
+        .label-text { min-width: 0; }
+        .label-sku { font-family: ui-monospace, monospace; font-weight: 700; font-size: 14px; }
+        .label-name { font-size: 13px; margin: 1px 0; word-break: break-word; }
+        .label-loc { font-size: 12px; color: #475569; }
+        @media print {
+            nav, footer, .no-print, .filters, form { display: none !important; }
+            .container { box-shadow: none; border: none; margin: 0; padding: 0; max-width: none; }
+            body { background: #fff; }
+            .label { border-color: #999; }
+        }
         .pager .page-no { color: #64748b; }
         form.inline { display: inline; }
         label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; color: #334155; }
@@ -486,6 +719,9 @@ LAYOUT = """
         .small-btn { display: inline-block; padding: 4px 10px; margin: 0; font-size: 12px; font-weight: 600;
                      color: #b91c1c; background: transparent; border: 1px solid transparent; border-radius: 6px; }
         .small-btn:hover { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
+        /* 盤點的「記錄」是儲存動作,不該長得像刪除;定義於 .small-btn 之後才蓋得過紅色 */
+        .small-btn.ok-btn { color: #1d4ed8; border-color: #93c5fd; }
+        .small-btn.ok-btn:hover { background: #eff6ff; color: #1d4ed8; border-color: #60a5fa; }
         .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 4px; }
         .filters input, .filters select { width: auto; margin-top: 0; }
         .filters input[type=submit] { margin-top: 0; padding: 9px 16px; }
@@ -561,6 +797,12 @@ LAYOUT = """
             .filters input[type=submit], .hero-search input[type=submit] { min-height: auto; }
             /* 直式表單的主要送出鈕滿版好按(篩選列與搜尋列除外) */
             form:not(.filters):not(.hero-search):not(.inline) > input[type=submit] { width: 100%; }
+            /* 盤點輸入:手機上整列堆疊,輸入框與按鈕都放大好按 */
+            table.cards td[data-label="實盤數"] { flex-direction: column; align-items: stretch; }
+            table.cards td[data-label="實盤數"]::before { margin-bottom: 6px; }
+            .count-form { width: 100%; }
+            .count-input, .count-note { width: 100% !important; flex: 1 1 100%; }
+            .count-form .small-btn { width: 100%; margin-top: 4px; }
         }
     </style>
 </head>
@@ -576,6 +818,10 @@ LAYOUT = """
         <a {% if request.path == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">報表</a>
         <a {% if request.path == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
         <a {% if request.path == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖搜圖</a>
+        <a {% if request.path.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">盤點</a>
+        <a {% if request.path.startswith('/reservations') %}class="active" {% endif %}href="{{ url_for('reservations_page') }}">預留</a>
+        <a {% if request.path.startswith('/planning') %}class="active" {% endif %}href="{{ url_for('planning_page') }}">存貨規劃</a>
+        <a {% if request.path == '/labels' %}class="active" {% endif %}href="{{ url_for('labels_page') }}">料架標籤</a>
         {% if session.get('is_admin') %}
         <a {% if request.path == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
         <a {% if request.path == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核軌跡</a>
@@ -670,6 +916,7 @@ PAGE_INDEX = """
     <a href="{{ url_for('stock_in') }}"><span class="qa-icon qa-in">⬇</span>入庫登記</a>
     <a href="{{ url_for('stock_out') }}"><span class="qa-icon qa-out">⬆</span>出庫登記</a>
     <a href="{{ url_for('image_search') }}"><span class="qa-icon">📷</span>以圖搜圖</a>
+    <a href="{{ url_for('counts_page') }}"><span class="qa-icon">📋</span>循環盤點</a>
     {% if session.get('is_admin') %}
     <a href="{{ url_for('csv_import') }}"><span class="qa-icon">📄</span>CSV 匯入</a>
     {% endif %}
@@ -677,17 +924,19 @@ PAGE_INDEX = """
 </div>
 {% if products %}
 <table class="cards">
-    <tr><th>SKU</th><th>名稱</th><th>別名料號</th><th>分類</th><th>庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th><th>操作</th></tr>
+    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th>別名料號</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>供應商</th><th>操作</th></tr>
     {% for p in products %}
-    <tr{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} class="low-stock"{% endif %}>
+    <tr{% if p['low_stock_threshold'] > 0 and p['available'] <= p['low_stock_threshold'] %} class="low-stock"{% endif %}>
         <td data-label="SKU">{{ p['sku'] }}</td>
-        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a>{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
+        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a>{% if p['low_stock_threshold'] > 0 and p['available'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
+        <td data-label="儲位" class="loc-cell">{{ p['location'] or '—' }}</td>
         <td data-label="別名料號" class="alias-cell">{{ p['alias_text'] or '—' }}</td>
         <td data-label="分類">{{ p['category'] }}</td>
-        <td data-label="庫存" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="可用" class="num" id="avail-{{ p['id'] }}">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
         <td data-label="單位">{{ p['unit'] }}</td>
-        <td data-label="單價">{{ p['unit_price_str'] }}</td>
-        <td data-label="低庫存門檻">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
+        <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
         <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
         <td data-label="操作">
             <a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">詳細</a>
@@ -715,13 +964,15 @@ PAGE_ALERTS = """
 {% if products %}
 <p>下列商品庫存已達到或低於門檻,請儘快補貨:</p>
 <table class="cards">
-    <tr><th>SKU</th><th>名稱</th><th>庫存</th><th>低庫存門檻</th><th>單位</th><th>供應商</th></tr>
+    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">現貨</th><th class="num">可用</th><th class="num">低庫存門檻</th><th>單位</th><th>供應商</th></tr>
     {% for p in products %}
     <tr class="low-stock">
         <td data-label="SKU">{{ p['sku'] }}</td>
         <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
-        <td data-label="庫存" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td data-label="低庫存門檻">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="儲位">{{ p['location'] or '—' }}</td>
+        <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
+        <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
         <td data-label="單位">{{ p['unit'] }}</td>
         <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
     </tr>
@@ -730,6 +981,28 @@ PAGE_ALERTS = """
 {% else %}
 <p>目前沒有低庫存商品。</p>
 {% endif %}
+
+<div class="detail-section">
+    <h2>效期警示</h2>
+    {% if expiring %}
+    <p class="note">下列批次已過期或將在 30 天內到期,請優先使用或處理:</p>
+    <table class="cards">
+        <tr><th>批號</th><th>商品</th><th>SKU</th><th class="num">剩餘</th><th>有效期</th><th class="num">剩餘天數</th></tr>
+        {% for l in expiring %}
+        <tr{% if l['expired'] %} class="low-stock"{% endif %}>
+            <td data-label="批號">{{ l['lot_no'] }}</td>
+            <td data-label="商品"><a class="plain" href="{{ url_for('product_detail', pid=l['product_id']) }}">{{ l['name'] }}</a></td>
+            <td data-label="SKU">{{ l['sku'] }}</td>
+            <td data-label="剩餘" class="num">{{ l['qty_remaining'] }} {{ l['unit'] }}</td>
+            <td data-label="有效期">{{ l['expiry_date'] }}</td>
+            <td data-label="剩餘天數" class="num">{% if l['expired'] %}<strong style="color:#b91c1c">已過期</strong>{% else %}{{ l['days_left'] }} 天{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>沒有即將到期的批次(僅統計有設定有效期的批次)。</p>
+    {% endif %}
+</div>
 """
 
 PAGE_PRODUCT_FORM = """
@@ -741,6 +1014,21 @@ PAGE_PRODUCT_FORM = """
     <label>單位</label><input type="text" name="unit" value="{{ f['unit'] }}">
     <label>單價</label><input type="text" name="unit_price" value="{{ f['unit_price'] }}">
     <label>低庫存門檻(0 = 不警示)</label><input type="number" name="low_stock_threshold" min="0" value="{{ f['low_stock_threshold'] }}">
+    <label>儲位(料放在哪一架/格)</label><input type="text" name="location" value="{{ f['location'] }}" placeholder="例:A-03-2">
+    <label>採購單位(選填,如「箱」)</label><input type="text" name="purchase_unit" value="{{ f['purchase_unit'] }}">
+    <label>每採購單位含幾個庫存單位</label><input type="number" name="units_per_purchase" min="1" value="{{ f['units_per_purchase'] }}">
+    <label>採購前置期(天,供安全庫存推導)</label><input type="number" name="lead_time_days" min="1" value="{{ f['lead_time_days'] }}">
+    <label>目標服務水準(%)</label>
+    <select name="service_level">
+        {% for lv in [80, 85, 90, 95, 97, 98, 99] %}
+        <option value="{{ lv }}" {% if f['service_level']|string == lv|string %}selected{% endif %}>{{ lv }}%</option>
+        {% endfor %}
+    </select>
+    <label>出庫策略</label>
+    <select name="issue_strategy">
+        <option value="FIFO" {% if f['issue_strategy'] == 'FIFO' %}selected{% endif %}>FIFO 先進先出(依入庫時間)</option>
+        <option value="FEFO" {% if f['issue_strategy'] == 'FEFO' %}selected{% endif %}>FEFO 先到期先出(有保存期限的料件)</option>
+    </select>
     <label>供應商</label>
     <select name="supplier_id">
         <option value="">(不指定)</option>
@@ -765,9 +1053,16 @@ PAGE_STOCK_FORM = """
     </select>
     <label>數量</label><input type="number" name="quantity" min="1" inputmode="numeric" value="{{ f['quantity'] }}">
     {% if is_in %}
+    <label>數量單位</label>
+    <select name="qty_unit">
+        <option value="stock" {% if f['qty_unit'] != 'purchase' %}selected{% endif %}>庫存單位(直接輸入實際數量)</option>
+        <option value="purchase" {% if f['qty_unit'] == 'purchase' %}selected{% endif %}>採購單位(依商品設定的換算率自動換算)</option>
+    </select>
     <label>批號(選填,未填自動編號)</label><input type="text" name="lot_no" value="{{ f['lot_no'] }}" placeholder="例:供應商批號">
+    <label>有效期(選填,設定後可做 FEFO 與到期警示)</label><input type="date" name="expiry_date" value="{{ f['expiry_date'] }}">
     <label>成本單價(選填,供加權平均成本報表)</label><input type="text" name="unit_cost" value="{{ f['unit_cost'] }}" inputmode="decimal">
     {% endif %}
+    <label>用途 / 工單(選填,可於歷史篩選)</label><input type="text" name="purpose" value="{{ f['purpose'] }}" placeholder="例:WO-1001、產線A、維修">
     <label>備註</label><input type="text" name="note" value="{{ f['note'] }}">
     <input type="submit" value="{{ title }}">
     {% if not is_in %}
@@ -795,6 +1090,7 @@ PAGE_HISTORY = """
     </select>
     起 <input type="date" name="start" value="{{ filters['start'] }}">
     迄 <input type="date" name="end" value="{{ filters['end'] }}">
+    <input type="text" name="purpose" placeholder="用途／工單" value="{{ filters['purpose'] }}">
     <input type="submit" value="篩選">
     <a class="plain" href="{{ url_for('history') }}">清除</a>
     &nbsp;|&nbsp;
@@ -802,7 +1098,7 @@ PAGE_HISTORY = """
 </form>
 {% if rows %}
 <table>
-    <tr><th>時間(台灣)</th><th>類型</th><th>商品</th><th>SKU</th><th>數量</th><th>批次</th><th>備註</th><th>操作人員</th></tr>
+    <tr><th>時間(台灣)</th><th>類型</th><th>商品</th><th>SKU</th><th class="num">數量</th><th>批次</th><th>用途／工單</th><th>備註</th><th>操作人員</th></tr>
     {% for r in rows %}
     <tr>
         <td>{{ r['created_local'] }}</td>
@@ -811,6 +1107,7 @@ PAGE_HISTORY = """
         <td>{{ r['sku'] }}</td>
         <td class="num">{{ r['quantity'] }}</td>
         <td class="alias-cell">{{ r['lot_info'] or '—' }}</td>
+        <td>{{ r['purpose'] or '—' }}</td>
         <td>{{ r['note'] }}</td>
         <td>{{ r['username'] }}</td>
     </tr>
@@ -918,36 +1215,74 @@ PAGE_REPORT = """
 <div class="detail-section">
     <h2>ABC 分析(柏拉圖法則)</h2>
     <table>
-        <tr><th>分級</th><th>SKU</th><th>名稱</th><th class="num">庫存價值</th><th class="num">價值占比</th><th class="num">累積占比</th></tr>
+        <tr><th>ABC</th><th>XYZ</th><th>組合</th><th>SKU</th><th>名稱</th><th class="num">庫存價值</th><th class="num">價值占比</th><th class="num">累積占比</th><th class="num">變異係數</th></tr>
         {% for r in abc_rows %}
         <tr>
             <td><strong>{{ r['abc'] }}</strong></td>
+            <td>{{ r['xyz'] }}</td>
+            <td><strong>{{ r['abc_xyz'] }}</strong></td>
             <td>{{ r['sku'] }}</td>
             <td>{{ r['name'] }}</td>
             <td class="num">{{ r['value_str'] }}</td>
             <td class="num">{{ r['pct_str'] }}%</td>
             <td class="num">{{ r['cum_pct_str'] }}%</td>
+            <td class="num">{{ r['cv_str'] }}</td>
         </tr>
         {% endfor %}
     </table>
-    <p class="note">A 級(累積價值 ≤80%)是最該重點盤點與控管的少數關鍵料號;B 級(≤95%)次之;C 級數量多但價值低,可放寬管理頻率。</p>
+    <p class="note">
+        A 級(累積價值 ≤80%)是最該重點盤點與控管的少數關鍵料號;B 級(≤95%)次之;C 級數量多但價值低,可放寬管理頻率。<br>
+        XYZ 依需求變異係數分級:X 穩定(CV&lt;0.5)、Y 中等(0.5–1.0)、Z 高度波動(&gt;1.0)。
+        組合的用法:<strong>AX</strong> 可壓低庫存高頻補貨,<strong>AZ</strong> 最棘手(要備量又怕呆滯),
+        <strong>CZ</strong> 乾脆多備一點——管理成本高於料件本身。
+    </p>
+</div>
+
+<div class="detail-section">
+    <h2>庫存準確率(帳實相符)</h2>
+    {% if accuracy_info %}
+    <div class="stat-row">
+        <div class="stat-box">
+            <div class="stat-num" id="accuracy-value">{{ accuracy_info['accuracy_str'] }}%</div>
+            <div class="stat-cap">最近一次盤點的相符比例</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-num" style="font-size:16px">{{ accuracy_info['name'] }}</div>
+            <div class="stat-cap">過帳於 {{ accuracy_info['posted_local'] }}</div>
+        </div>
+    </div>
+    <p class="note">業界基準為 95–99%。低於此區間代表現場作業與系統登記之間有系統性落差,應提高盤點頻率並追查原因。</p>
+    {% else %}
+    <p>尚無已過帳的盤點單。<a class="plain" href="{{ url_for('counts_page') }}">建立第一張盤點單</a>後,這裡會顯示庫存準確率。</p>
+    {% endif %}
 </div>
 """
 
 PAGE_PRODUCT_DETAIL = """
 <h1>商品詳細:{{ p['name'] }}</h1>
 <table class="cards">
-    <tr><th>SKU</th><th>分類</th><th>目前庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th></tr>
+    <tr><th>SKU</th><th>儲位</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>出庫策略</th><th>供應商</th></tr>
     <tr>
         <td data-label="SKU">{{ p['sku'] }}</td>
+        <td data-label="儲位">{{ p['location'] or '—' }}</td>
         <td data-label="分類">{{ p['category'] }}</td>
-        <td data-label="目前庫存" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td data-label="單位">{{ p['unit'] }}</td>
-        <td data-label="單價">{{ p['unit_price_str'] }}</td>
-        <td data-label="低庫存門檻">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
+        <td data-label="單位">{{ p['unit'] }}{% if p['purchase_unit'] %}(採購:1 {{ p['purchase_unit'] }} = {{ p['units_per_purchase'] }} {{ p['unit'] }}){% endif %}</td>
+        <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
+        <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
+        <td data-label="出庫策略">{{ p['issue_strategy'] }}</td>
         <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
     </tr>
 </table>
+<div class="qr-row">
+    <img class="qr-img" src="{{ url_for('product_qr', pid=p['id']) }}" alt="料號 QR">
+    <div>
+        <div class="qr-cap">料架標籤 QR</div>
+        <p class="note">列印貼在料架上,手機掃碼即可直接開啟本頁登記進出。
+        <a class="plain" href="{{ url_for('labels_page') }}">批次列印所有標籤</a></p>
+    </div>
+</div>
 <div class="action-links">
     <a class="primary" href="{{ url_for('stock_in', product_id=p['id']) }}"><span class="qa-in">⬇</span> 入庫</a>
     <a class="primary" href="{{ url_for('stock_out', product_id=p['id']) }}"><span class="qa-out">⬆</span> 出庫</a>
@@ -1016,12 +1351,13 @@ PAGE_PRODUCT_DETAIL = """
     <h2>批次庫存(FIFO 先進先出)</h2>
     {% if lots %}
     <table class="cards">
-        <tr><th>批號</th><th>入庫時間(台灣)</th><th>庫齡(天)</th><th>剩餘 / 原始</th><th>成本單價</th><th>備註</th></tr>
+        <tr><th>批號</th><th>入庫時間(台灣)</th><th class="num">庫齡(天)</th><th>有效期</th><th class="num">剩餘 / 原始</th><th class="num">成本單價</th><th>備註</th></tr>
         {% for l in lots %}
         <tr{% if l['qty_remaining'] == 0 %} class="lot-empty"{% endif %}>
             <td data-label="批號">{{ l['lot_no'] }}</td>
             <td data-label="入庫時間">{{ l['received_local'] }}</td>
             <td data-label="庫齡(天)" class="num">{{ l['age_days'] }}</td>
+            <td data-label="有效期">{{ l['expiry_date'] or '—' }}</td>
             <td data-label="剩餘/原始" class="num">{{ l['qty_remaining'] }} / {{ l['qty_received'] }}</td>
             <td data-label="成本單價" class="num">{{ l['cost_str'] }}</td>
             <td data-label="備註">{{ l['note'] }}</td>
@@ -1124,6 +1460,235 @@ PAGE_AUDIT = """
 {{ pager }}
 {% else %}
 <p>目前沒有稽核紀錄。</p>
+{% endif %}
+"""
+
+PAGE_COUNTS = """
+<h1>循環盤點</h1>
+<p class="note">
+    業界實務:依 ABC 分級滾動盤點(A 類每週、B 類每月、C 類每季),而非一年一次大盤。
+    研究顯示未持續盤點的系統,帳面會單向偏離且不會自行修正。
+</p>
+
+{% if session.get('is_admin') %}
+<div class="detail-section">
+    <h2>建立盤點單</h2>
+    <form method="post" action="{{ url_for('count_new') }}">
+        <label>盤點單名稱</label><input type="text" name="name" placeholder="例:{{ today }} A類週盤">
+        <label>盤點範圍</label>
+        <select name="scope">
+            <option value="all">全部商品</option>
+            <option value="A">僅 A 類(高價值,建議每週)</option>
+            <option value="B">僅 B 類(建議每月)</option>
+            <option value="C">僅 C 類(建議每季)</option>
+            <option value="category">指定分類</option>
+        </select>
+        <label>分類(範圍選「指定分類」時適用)</label>
+        <select name="category">
+            <option value="">(不指定)</option>
+            {% for c in categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+        <input type="submit" value="建立盤點單">
+    </form>
+</div>
+{% endif %}
+
+<div class="detail-section">
+    <h2>盤點單列表</h2>
+    {% if rows %}
+    <table class="cards">
+        <tr><th>名稱</th><th>範圍</th><th>建立時間</th><th>建立者</th><th>狀態</th><th class="num">準確率</th><th>操作</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td data-label="名稱">{{ r['name'] }}</td>
+            <td data-label="範圍">{{ r['scope'] }}</td>
+            <td data-label="建立時間">{{ r['created_local'] }}</td>
+            <td data-label="建立者">{{ r['username'] }}</td>
+            <td data-label="狀態">{% if r['status'] == 'posted' %}<span class="chip-posted">已過帳</span>{% else %}<span class="chip-open">盤點中</span>{% endif %}</td>
+            <td data-label="準確率" class="num">{% if r['accuracy'] is not none %}{{ r['accuracy_str'] }}%{% else %}—{% endif %}</td>
+            <td data-label="操作"><a class="plain" href="{{ url_for('count_detail', cid=r['id']) }}">開啟</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>尚無盤點單。{% if session.get('is_admin') %}用上方表單建立第一張。{% else %}請洽管理員建立。{% endif %}</p>
+    {% endif %}
+</div>
+"""
+
+PAGE_COUNT_DETAIL = """
+<h1>盤點單:{{ c['name'] }}</h1>
+<p class="note">
+    範圍 {{ c['scope'] }}・建立於 {{ c['created_local'] }}({{ c['username'] }})・
+    {% if c['status'] == 'posted' %}<strong>已於 {{ c['posted_local'] }} 過帳,準確率 {{ c['accuracy_str'] }}%</strong>
+    {% else %}狀態:盤點中(輸入實盤數後由管理員過帳修正庫存){% endif %}
+</p>
+
+<div class="stat-row">
+    <div class="stat-box"><div class="stat-num">{{ total }}</div><div class="stat-cap">盤點品項</div></div>
+    <div class="stat-box"><div class="stat-num">{{ counted }}</div><div class="stat-cap">已盤</div></div>
+    <div class="stat-box"><div class="stat-num" style="color:#b91c1c">{{ diff_count }}</div><div class="stat-cap">有差異</div></div>
+</div>
+
+<table class="cards">
+    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">系統帳</th><th class="num">實盤數</th><th class="num">差異</th><th>備註</th></tr>
+    {% for i in items %}
+    <tr{% if i['diff'] is not none and i['diff'] != 0 %} class="has-diff"{% endif %}>
+        <td data-label="SKU">{{ i['sku'] }}</td>
+        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['name'] }}</a></td>
+        <td data-label="儲位">{{ i['location'] or '—' }}</td>
+        <td data-label="系統帳" class="num">{{ i['system_qty'] }}</td>
+        <td data-label="實盤數" class="num">
+            {% if c['status'] == 'posted' %}{{ i['counted_qty'] if i['counted_qty'] is not none else '—' }}
+            {% else %}
+            <form class="inline count-form" method="post" action="{{ url_for('count_record', cid=c['id']) }}">
+                <input type="hidden" name="product_id" value="{{ i['product_id'] }}">
+                <input type="number" name="counted_qty" min="0" inputmode="numeric" class="count-input"
+                       value="{{ i['counted_qty'] if i['counted_qty'] is not none else '' }}">
+                <input type="text" name="note" class="count-note" placeholder="差異原因" value="{{ i['note'] }}">
+                <button class="small-btn ok-btn" type="submit">記錄</button>
+            </form>
+            {% endif %}
+        </td>
+        <td data-label="差異" class="num">{% if i['diff'] is not none %}{{ '%+d' % i['diff'] }}{% else %}—{% endif %}</td>
+        <td data-label="備註">{{ i['note'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+{% if c['status'] != 'posted' and session.get('is_admin') %}
+<div class="detail-section">
+    <h2>過帳</h2>
+    <p class="note">
+        過帳會依實盤數修正庫存:盤虧依出庫策略消耗批次、盤盈建立調整批,並產生「盤點調整」異動與稽核紀錄。
+        未填實盤數的品項會被略過。過帳後不可再修改。
+    </p>
+    <form method="post" action="{{ url_for('count_post', cid=c['id']) }}"
+          onsubmit="return confirm('確定過帳?將依實盤數修正 {{ diff_count }} 項商品的庫存,且不可復原。');">
+        <input type="submit" value="過帳並修正庫存">
+    </form>
+</div>
+{% endif %}
+"""
+
+PAGE_RESERVATIONS = """
+<h1>庫存預留</h1>
+<p class="note">
+    預留讓「已被承諾出去」的數量從可用量中扣除,避免兩個人同時把同一批料承諾給不同用途。
+    現貨量不受影響——實際領走時才走出庫。
+</p>
+
+<div class="detail-section">
+    <h2>建立預留</h2>
+    <form method="post" action="{{ url_for('reservation_new') }}">
+        <label>商品</label>
+        <select name="product_id">
+            {% for p in product_list %}
+            <option value="{{ p['id'] }}">{{ p['name'] }}({{ p['sku'] }},可用 {{ p['available'] }} {{ p['unit'] }})</option>
+            {% endfor %}
+        </select>
+        <label>預留數量</label><input type="number" name="quantity" min="1" inputmode="numeric">
+        <label>用途(工單／專案／客戶)</label><input type="text" name="purpose" placeholder="例:WO-1001">
+        <input type="submit" value="建立預留">
+    </form>
+</div>
+
+<div class="detail-section">
+    <h2>有效預留</h2>
+    {% if rows %}
+    <table class="cards">
+        <tr><th>商品</th><th>SKU</th><th class="num">預留量</th><th>用途</th><th>建立者</th><th>建立時間</th><th>操作</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td data-label="商品">{{ r['name'] }}</td>
+            <td data-label="SKU">{{ r['sku'] }}</td>
+            <td data-label="預留量" class="num">{{ r['quantity'] }}</td>
+            <td data-label="用途">{{ r['purpose'] or '—' }}</td>
+            <td data-label="建立者">{{ r['username'] }}</td>
+            <td data-label="建立時間">{{ r['created_local'] }}</td>
+            <td data-label="操作">
+                <form class="inline" method="post" action="{{ url_for('reservation_release', rid=r['id']) }}">
+                    <button class="small-btn ok-btn" type="submit">釋放</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>目前沒有有效的預留。</p>
+    {% endif %}
+</div>
+"""
+
+PAGE_PLANNING = """
+<h1>存貨規劃:安全庫存建議</h1>
+<div class="import-help">
+    <p>
+        低庫存門檻不該憑印象填。系統以最近 {{ window }} 天的實際出庫資料算出<strong>日均用量</strong>與
+        <strong>標準差</strong>,套安全庫存公式推導建議值:
+    </p>
+    <p><code>安全庫存 = Z × 用量標準差 × √前置期</code>,<code>再訂購點 = 日均用量 × 前置期 + 安全庫存</code></p>
+    <p>
+        Z 由該商品的<strong>目標服務水準</strong>決定(95% → Z=1.65),前置期與服務水準可在商品編輯頁調整。
+        沒有出庫歷史的商品無法推導,顯示「—」。
+    </p>
+</div>
+
+<table class="cards">
+    <tr>
+        <th>SKU</th><th>名稱</th><th class="num">日均用量</th><th class="num">標準差</th>
+        <th class="num">前置期</th><th class="num">服務水準</th>
+        <th class="num">建議安全庫存</th><th class="num">再訂購點</th><th class="num">目前門檻</th><th>XYZ</th>
+    </tr>
+    {% for r in rows %}
+    <tr>
+        <td data-label="SKU">{{ r['sku'] }}</td>
+        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=r['id']) }}">{{ r['name'] }}</a></td>
+        <td data-label="日均用量" class="num">{{ r['mean_str'] }}</td>
+        <td data-label="標準差" class="num">{{ r['sd_str'] }}</td>
+        <td data-label="前置期" class="num">{{ r['lead_time_days'] }} 天</td>
+        <td data-label="服務水準" class="num">{{ r['service_level_str'] }}%</td>
+        <td data-label="建議安全庫存" class="num"><strong>{{ r['ss_str'] }}</strong></td>
+        <td data-label="再訂購點" class="num">{{ r['rop_str'] }}</td>
+        <td data-label="目前門檻" class="num">{{ r['low_stock_threshold'] }}</td>
+        <td data-label="XYZ">{{ r['xyz'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+{% if has_suggestion and session.get('is_admin') %}
+<div class="detail-section">
+    <h2>套用建議</h2>
+    <p class="note">將所有可推導商品的低庫存門檻,一次更新為上表的建議安全庫存。個別商品仍可在編輯頁手動調整。</p>
+    <form method="post" action="{{ url_for('planning_apply') }}"
+          onsubmit="return confirm('確定將建議值套用到所有可推導的商品門檻?');">
+        <input type="submit" value="一鍵套用建議門檻">
+    </form>
+</div>
+{% endif %}
+"""
+
+PAGE_LABELS = """
+<h1>料架標籤列印</h1>
+<p class="note no-print">
+    列印後貼在料架上,現場用手機掃 QR 即可直接開啟該料號頁面登記進出,不必打字找料號。
+    按瀏覽器的列印功能(Ctrl+P / 手機分享選單)即可輸出。
+</p>
+{% if not has_qrcode %}
+<div class="msg error">此功能需要安裝 qrcode 套件(pip install qrcode)後重新啟動系統。</div>
+{% else %}
+<div class="label-sheet">
+    {% for p in products %}
+    <div class="label">
+        <img src="{{ url_for('product_qr', pid=p['id']) }}" alt="QR">
+        <div class="label-text">
+            <div class="label-sku">{{ p['sku'] }}</div>
+            <div class="label-name">{{ p['name'] }}</div>
+            <div class="label-loc">儲位:{{ p['location'] or '未設定' }}</div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
 {% endif %}
 """
 
@@ -1408,10 +1973,10 @@ def query_products(q="", category="", limit=None, offset=0):
     """
     params = []
     if q:
-        sql += """ AND (p.name LIKE ? OR p.sku LIKE ? OR EXISTS (
+        sql += """ AND (p.name LIKE ? OR p.sku LIKE ? OR p.location LIKE ? OR EXISTS (
                      SELECT 1 FROM part_aliases a WHERE a.product_id = p.id
                        AND (a.alias_sku LIKE ? OR a.company LIKE ?)))"""
-        params += [f"%{q}%"] * 4
+        params += [f"%{q}%"] * 5
     if category:
         sql += " AND p.category = ?"
         params.append(category)
@@ -1420,8 +1985,11 @@ def query_products(q="", category="", limit=None, offset=0):
         sql += " LIMIT ? OFFSET ?"
         params += [limit + 1, offset]   # 多取一筆用來判斷是否還有下一頁
     rows = [dict(r) for r in get_db().execute(sql, params).fetchall()]
+    resv = reserved_map()
     for r in rows:
         r["unit_price_str"] = fmt_money(r["unit_price"])
+        r["reserved"] = resv.get(r["id"], 0)
+        r["available"] = r["quantity"] - r["reserved"]   # 業界的 on-hand vs available 區分
     return rows
 
 
@@ -1440,9 +2008,11 @@ def render_index(error=None, msg=None):
     categories = [r["category"] for r in db.execute(
         "SELECT DISTINCT category FROM products WHERE category != '' ORDER BY category"
     ).fetchall()]
-    low_count = db.execute(
-        "SELECT COUNT(*) AS c FROM products WHERE low_stock_threshold > 0 AND quantity <= low_stock_threshold"
-    ).fetchone()["c"]
+    # banner 計數同樣以可用量為準,與警示頁一致
+    resv_all = reserved_map()
+    low_count = sum(1 for r in db.execute(
+        "SELECT id, quantity, low_stock_threshold FROM products WHERE low_stock_threshold > 0"
+    ).fetchall() if (r["quantity"] - resv_all.get(r["id"], 0)) <= r["low_stock_threshold"])
     return render_page(PAGE_INDEX, products=products, q=q, category=category,
                        categories=categories, low_count=low_count,
                        pager=build_pager("index", page, has_next, q=q, category=category),
@@ -1458,13 +2028,39 @@ def index():
 @app.route("/alerts")
 @login_required
 def alerts():
-    rows = [dict(r) for r in get_db().execute("""
-        SELECT p.*, s.name AS supplier_name
-        FROM products p LEFT JOIN suppliers s ON p.supplier_id = s.id
-        WHERE p.low_stock_threshold > 0 AND p.quantity <= p.low_stock_threshold
-        ORDER BY p.quantity ASC
-    """).fetchall()]
-    return render_page(PAGE_ALERTS, products=rows)
+    db = get_db()
+    resv = reserved_map()
+    rows = []
+    # 低庫存以「可用量」判斷:已被預留的量不該算成可動用庫存
+    for r in db.execute("""
+            SELECT p.*, s.name AS supplier_name
+            FROM products p LEFT JOIN suppliers s ON p.supplier_id = s.id
+            WHERE p.low_stock_threshold > 0
+            ORDER BY p.quantity ASC
+        """).fetchall():
+        d = dict(r)
+        d["reserved"] = resv.get(r["id"], 0)
+        d["available"] = r["quantity"] - d["reserved"]
+        if d["available"] <= r["low_stock_threshold"]:
+            rows.append(d)
+    # 即將到期批次(30 天內)與已過期批次:FEFO 料件的呆滯與報廢風險
+    horizon = (today_local() + timedelta(days=30)).isoformat()
+    today = today_local().isoformat()
+    expiring = []
+    for r in db.execute("""
+            SELECT l.*, p.name, p.sku, p.unit FROM lots l JOIN products p ON l.product_id = p.id
+            WHERE l.qty_remaining > 0 AND l.expiry_date != '' AND l.expiry_date <= ?
+            ORDER BY l.expiry_date
+        """, (horizon,)).fetchall():
+        d = dict(r)
+        d["expired"] = r["expiry_date"] < today
+        try:
+            d["days_left"] = (datetime.strptime(r["expiry_date"], "%Y-%m-%d").date()
+                              - today_local()).days
+        except ValueError:
+            d["days_left"] = 0
+        expiring.append(d)
+    return render_page(PAGE_ALERTS, products=rows, expiring=expiring)
 
 
 # ---------------------------------------------------------------------------
@@ -1481,9 +2077,31 @@ def parse_product_form():
         "unit_price": request.form.get("unit_price", "").strip() or "0",
         "low_stock_threshold": request.form.get("low_stock_threshold", "").strip() or "0",
         "supplier_id": request.form.get("supplier_id", "").strip(),
+        "location": request.form.get("location", "").strip(),
+        "purchase_unit": request.form.get("purchase_unit", "").strip(),
+        "units_per_purchase": request.form.get("units_per_purchase", "").strip() or "1",
+        "lead_time_days": request.form.get("lead_time_days", "").strip() or "7",
+        "service_level": request.form.get("service_level", "").strip() or "95",
+        "issue_strategy": request.form.get("issue_strategy", "FIFO").strip(),
     }
     if not f["name"] or not f["sku"]:
         return f, "商品名稱與 SKU 不可為空"
+    upp = safe_int(f["units_per_purchase"])
+    if upp is None or upp < 1 or upp > MAX_QUANTITY:
+        return f, "每採購單位的換算數量必須為 1 以上的整數"
+    f["upp_val"] = upp
+    lead = safe_int(f["lead_time_days"])
+    if lead is None or lead < 1 or lead > 3650:
+        return f, "採購前置期必須為 1~3650 天"
+    f["lead_val"] = lead
+    try:
+        f["service_val"] = float(f["service_level"])
+        if not math.isfinite(f["service_val"]) or not (50 <= f["service_val"] <= 99.9):
+            raise ValueError
+    except (ValueError, TypeError):
+        return f, "服務水準必須介於 50 與 99.9 之間"
+    if f["issue_strategy"] not in ("FIFO", "FEFO"):
+        f["issue_strategy"] = "FIFO"
     try:
         f["unit_price_val"] = float(f["unit_price"])
         # math.isfinite 擋掉 inf / nan:否則會污染報表金額與 ABC 分級
@@ -1510,7 +2128,9 @@ def supplier_options():
 
 
 EMPTY_PRODUCT_FORM = {"name": "", "sku": "", "category": "", "unit": "個",
-                      "unit_price": "0", "low_stock_threshold": "0", "supplier_id": ""}
+                      "unit_price": "0", "low_stock_threshold": "0", "supplier_id": "",
+                      "location": "", "purchase_unit": "", "units_per_purchase": "1",
+                      "lead_time_days": "7", "service_level": "95", "issue_strategy": "FIFO"}
 
 
 @app.route("/products/new", methods=["GET", "POST"])
@@ -1525,10 +2145,14 @@ def product_new():
             try:
                 cur = db.execute("""
                     INSERT INTO products (name, sku, category, unit, unit_price,
-                                          low_stock_threshold, supplier_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                          low_stock_threshold, supplier_id, created_at,
+                                          location, purchase_unit, units_per_purchase,
+                                          lead_time_days, service_level, issue_strategy)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (f["name"], f["sku"], f["category"], f["unit"], f["unit_price_val"],
-                      f["threshold_val"], f["supplier_val"], now_str()))
+                      f["threshold_val"], f["supplier_val"], now_str(),
+                      f["location"], f["purchase_unit"], f["upp_val"],
+                      f["lead_val"], f["service_val"], f["issue_strategy"]))
                 audit("新增商品", "商品", cur.lastrowid, f"{f['sku']} {f['name']}")
                 db.commit()
                 return redirect(url_for("index"))
@@ -1552,10 +2176,14 @@ def product_edit(pid):
             try:
                 db.execute("""
                     UPDATE products SET name=?, sku=?, category=?, unit=?, unit_price=?,
-                                        low_stock_threshold=?, supplier_id=?
+                                        low_stock_threshold=?, supplier_id=?, location=?,
+                                        purchase_unit=?, units_per_purchase=?,
+                                        lead_time_days=?, service_level=?, issue_strategy=?
                     WHERE id=?
                 """, (f["name"], f["sku"], f["category"], f["unit"], f["unit_price_val"],
-                      f["threshold_val"], f["supplier_val"], pid))
+                      f["threshold_val"], f["supplier_val"], f["location"],
+                      f["purchase_unit"], f["upp_val"], f["lead_val"],
+                      f["service_val"], f["issue_strategy"], pid))
                 audit("編輯商品", "商品", pid,
                       f"{f['sku']} {f['name']} 單價={f['unit_price_val']} 門檻={f['threshold_val']}")
                 db.commit()
@@ -1566,7 +2194,12 @@ def product_edit(pid):
         f = {"name": row["name"], "sku": row["sku"], "category": row["category"],
              "unit": row["unit"], "unit_price": fmt_num(row["unit_price"]),
              "low_stock_threshold": str(row["low_stock_threshold"]),
-             "supplier_id": "" if row["supplier_id"] is None else str(row["supplier_id"])}
+             "supplier_id": "" if row["supplier_id"] is None else str(row["supplier_id"]),
+             "location": row["location"] or "", "purchase_unit": row["purchase_unit"] or "",
+             "units_per_purchase": str(row["units_per_purchase"] or 1),
+             "lead_time_days": str(row["lead_time_days"] or 7),
+             "service_level": fmt_num(row["service_level"] or 95),
+             "issue_strategy": row["issue_strategy"] or "FIFO"}
     return render_page(PAGE_PRODUCT_FORM, title="編輯商品", f=f,
                        supplier_list=supplier_options(), error=error)
 
@@ -1612,6 +2245,8 @@ def render_product_detail(pid, error=None, msg=None):
         return render_index(error="找不到指定的商品")
     p = dict(row)
     p["unit_price_str"] = fmt_money(p["unit_price"])
+    p["reserved"] = reserved_qty(pid)
+    p["available"] = p["quantity"] - p["reserved"]
     images = db.execute(
         "SELECT * FROM product_images WHERE product_id = ? ORDER BY id", (pid,)).fetchall()
     aliases = db.execute(
@@ -1750,6 +2385,9 @@ def parse_stock_form():
         "note": request.form.get("note", "").strip(),
         "lot_no": request.form.get("lot_no", "").strip(),
         "unit_cost": request.form.get("unit_cost", "").strip(),
+        "purpose": request.form.get("purpose", "").strip(),
+        "expiry_date": request.form.get("expiry_date", "").strip(),
+        "qty_unit": request.form.get("qty_unit", "stock").strip(),
     }
     qty = safe_int(f["quantity"])
     if qty is None or qty <= 0:
@@ -1772,7 +2410,8 @@ def parse_stock_form():
     return f, None
 
 
-EMPTY_STOCK_FORM = {"product_id": "", "quantity": "", "note": "", "lot_no": "", "unit_cost": ""}
+EMPTY_STOCK_FORM = {"product_id": "", "quantity": "", "note": "", "lot_no": "",
+                    "unit_cost": "", "purpose": "", "expiry_date": "", "qty_unit": "stock"}
 
 
 def stock_done_msg(action):
@@ -1799,27 +2438,35 @@ def stock_in():
         if not error:
             db = get_db()
             pid, qty = int(f["product_id"]), int(f["quantity"])
-            updated = db.execute(
-                "UPDATE products SET quantity = quantity + ? WHERE id = ?", (qty, pid)
-            ).rowcount
-            if updated == 0:
-                db.rollback()
+            prow = db.execute(
+                "SELECT purchase_unit, units_per_purchase FROM products WHERE id = ?", (pid,)).fetchone()
+            if prow is None:
                 error = "找不到指定的商品"
+            elif f["qty_unit"] == "purchase" and not (prow["purchase_unit"] or "").strip():
+                error = "此商品尚未設定採購單位,請先在商品編輯頁設定,或改用庫存單位輸入"
             else:
+                # 採購單位輸入時依換算率換成庫存單位(避免現場心算造成帳差)
+                if f["qty_unit"] == "purchase":
+                    qty = qty * max(1, prow["units_per_purchase"] or 1)
+                    if qty > MAX_QUANTITY:
+                        error = "換算後數量過大,請確認輸入"
+            if not error:
                 ts = now_str()
+                db.execute("UPDATE products SET quantity = quantity + ? WHERE id = ?", (qty, pid))
                 cur = db.execute("""
-                    INSERT INTO transactions (product_id, user_id, type, quantity, note, created_at)
-                    VALUES (?, ?, 'in', ?, ?, ?)
-                """, (pid, session["user_id"], qty, f["note"], ts))
+                    INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at)
+                    VALUES (?, ?, 'in', ?, ?, ?, ?)
+                """, (pid, session["user_id"], qty, f["note"], f["purpose"], ts))
                 tx_id = cur.lastrowid
                 # 每筆入庫建立一個批次(Lot Tracking);批號未填則自動編號
                 lot_no = f["lot_no"] or f"L{datetime.now(timezone.utc).strftime('%Y%m%d')}-{tx_id}"
                 try:
                     db.execute("""
                         INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
-                                          qty_remaining, unit_cost, note, received_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (pid, tx_id, lot_no, qty, qty, f["unit_cost_val"], f["note"], ts))
+                                          qty_remaining, unit_cost, note, received_at, expiry_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (pid, tx_id, lot_no, qty, qty, f["unit_cost_val"], f["note"], ts,
+                          f["expiry_date"]))
                 except sqlite3.IntegrityError:
                     db.rollback()
                     error = "此商品已有相同批號,請改用其他批號"
@@ -1857,43 +2504,11 @@ def stock_out():
                 else:
                     ts = now_str()
                     cur = db.execute("""
-                        INSERT INTO transactions (product_id, user_id, type, quantity, note, created_at)
-                        VALUES (?, ?, 'out', ?, ?, ?)
-                    """, (pid, session["user_id"], qty, f["note"], ts))
+                        INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at)
+                        VALUES (?, ?, 'out', ?, ?, ?, ?)
+                    """, (pid, session["user_id"], qty, f["note"], f["purpose"], ts))
                     tx_id = cur.lastrowid
-                    # FIFO 先進先出:自最早入庫的批次依序扣減,並記錄消耗明細供追溯
-                    remaining = qty
-                    lots_fifo = db.execute("""
-                        SELECT id, qty_remaining FROM lots
-                        WHERE product_id = ? AND qty_remaining > 0
-                        ORDER BY received_at, id
-                    """, (pid,)).fetchall()
-                    for lot in lots_fifo:
-                        if remaining <= 0:
-                            break
-                        take = min(lot["qty_remaining"], remaining)
-                        db.execute("UPDATE lots SET qty_remaining = qty_remaining - ? WHERE id = ?",
-                                   (take, lot["id"]))
-                        db.execute("""
-                            INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
-                            VALUES (?, ?, ?)
-                        """, (tx_id, lot["id"], take))
-                        remaining -= take
-                    if remaining > 0:
-                        # 防禦:批次帳有缺口時建調整批補齊(正常流程不會發生)
-                        cur2 = db.execute("""
-                            INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
-                                              qty_remaining, note, received_at)
-                            VALUES (?, ?, ?, ?, 0, '缺口調整批', ?)
-                        """, (pid, tx_id, f"ADJ-{tx_id}", remaining, ts))
-                        # 正常流程不該走到這裡:留下明確告警供人工稽核,不靜默吸收
-                        audit("批次帳異常", "商品", pid,
-                              f"出庫 {qty} 時批次剩餘不足 {remaining},已建立缺口調整批 ADJ-{tx_id}")
-                        print(f"[警告] 商品 {pid} 批次帳出現缺口 {remaining},已記錄稽核軌跡")
-                        db.execute("""
-                            INSERT INTO lot_consumptions (transaction_id, lot_id, quantity)
-                            VALUES (?, ?, ?)
-                        """, (tx_id, cur2.lastrowid, remaining))
+                    consume_lots(db, pid, qty, tx_id, ts)
                     db.commit()
                     return redirect(url_for("stock_out", done=pid, qty=qty))
     return render_page(PAGE_STOCK_FORM, title="出庫登記", f=f, is_in=False,
@@ -1911,6 +2526,7 @@ def history_filters():
         "type": request.args.get("type", "").strip(),
         "start": request.args.get("start", "").strip(),
         "end": request.args.get("end", "").strip(),
+        "purpose": request.args.get("purpose", "").strip(),
     }
 
 
@@ -1938,6 +2554,9 @@ def query_transactions(filters, limit=None, offset=0):
     if filters["type"] in ("in", "out"):
         sql += " AND t.type = ?"
         params.append(filters["type"])
+    if filters["purpose"]:
+        sql += " AND t.purpose LIKE ?"
+        params.append(f"%{filters['purpose']}%")
     # 使用者填的是台灣日期,DB 存 UTC,需換算區間才不會整體偏移 8 小時
     start_utc, end_utc = local_date_to_utc_range(filters["start"], filters["end"])
     if start_utc:
@@ -2125,9 +2744,26 @@ def report():
     aging_total = sum(b[3] for b in buckets)
     aging = [{"label": b[0], "qty": b[3],
               "pct_str": fmt_num(b[3] / aging_total * 100) if aging_total > 0 else "0"} for b in buckets]
+    # XYZ 分級(依需求變異係數)與 ABC-XYZ 組合:價值之外再看穩定度
+    for r in abc_rows:
+        stats = usage_stats(r["id"])
+        xyz, cv = xyz_class(stats)
+        r["xyz"] = xyz
+        r["cv_str"] = fmt_num(cv) if cv is not None else "—"
+        r["abc_xyz"] = f"{r['abc']}{xyz}" if xyz != "—" else r["abc"]
+    # 庫存準確率:最近一次已過帳盤點的相符比例(業界基準 95–99%)
+    last_count = db.execute("""
+        SELECT name, accuracy, posted_at FROM stock_counts
+        WHERE status = 'posted' AND accuracy IS NOT NULL ORDER BY id DESC LIMIT 1
+    """).fetchone()
+    accuracy_info = None
+    if last_count:
+        accuracy_info = {"name": last_count["name"],
+                         "accuracy_str": fmt_num(last_count["accuracy"]),
+                         "posted_local": fmt_local(last_count["posted_at"])}
     return render_page(
         PAGE_REPORT, rows=rows, start=start, end=end,
-        abc_rows=abc_rows, aging=aging,
+        abc_rows=abc_rows, aging=aging, accuracy_info=accuracy_info,
         total_in=sum(r["total_in"] for r in rows),
         total_out=sum(r["total_out"] for r in rows),
         total_net=sum(r["net"] for r in rows),
@@ -2181,6 +2817,342 @@ def image_search():
                         if len(results) >= 10:
                             break
     return render_page(PAGE_IMAGE_SEARCH, results=results, has_pil=HAS_PIL, error=error)
+
+
+# ---------------------------------------------------------------------------
+# 循環盤點:建立盤點單 → 逐項輸入實盤數 → 過帳修正庫存
+# ---------------------------------------------------------------------------
+
+SCOPE_LABELS = {"all": "全部商品", "A": "A 類", "B": "B 類", "C": "C 類", "category": "指定分類"}
+
+
+def abc_class_map():
+    """依庫存價值累積占比計算每個商品的 ABC 分級(與報表同一套規則)。"""
+    rows = get_db().execute(
+        "SELECT id, quantity * unit_price AS value FROM products").fetchall()
+    total = sum(r["value"] for r in rows) or 0
+    ranked = sorted(rows, key=lambda r: r["value"], reverse=True)
+    result, cum = {}, 0.0
+    for r in ranked:
+        prev_pct = (cum / total * 100) if total > 0 else 100.0
+        cum += r["value"]
+        result[r["id"]] = "A" if prev_pct < 80 else ("B" if prev_pct < 95 else "C")
+    return result
+
+
+@app.route("/counts")
+@login_required
+def counts_page(error=None, msg=None):
+    db = get_db()
+    rows = []
+    for r in db.execute("SELECT * FROM stock_counts ORDER BY id DESC LIMIT 100").fetchall():
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        d["accuracy_str"] = fmt_num(r["accuracy"]) if r["accuracy"] is not None else "—"
+        rows.append(d)
+    categories = [r["category"] for r in db.execute(
+        "SELECT DISTINCT category FROM products WHERE category != '' ORDER BY category").fetchall()]
+    return render_page(PAGE_COUNTS, rows=rows, categories=categories,
+                       today=today_local().isoformat(), error=error, msg=msg)
+
+
+@app.route("/counts/new", methods=["POST"])
+@admin_required
+def count_new():
+    name = request.form.get("name", "").strip()
+    scope = request.form.get("scope", "all").strip()
+    category = request.form.get("category", "").strip()
+    if not name:
+        return counts_page(error="盤點單名稱不可為空")
+    db = get_db()
+    if scope == "category":
+        if not category:
+            return counts_page(error="範圍選「指定分類」時必須選擇分類")
+        products = db.execute(
+            "SELECT id, quantity FROM products WHERE category = ? ORDER BY id", (category,)).fetchall()
+        scope_label = f"分類:{category}"
+    elif scope in ("A", "B", "C"):
+        abc = abc_class_map()
+        products = [p for p in db.execute("SELECT id, quantity FROM products ORDER BY id").fetchall()
+                    if abc.get(p["id"]) == scope]
+        scope_label = f"{scope} 類"
+    else:
+        products = db.execute("SELECT id, quantity FROM products ORDER BY id").fetchall()
+        scope_label = "全部商品"
+    if not products:
+        return counts_page(error="此範圍內沒有商品,請改選其他範圍")
+    ts = now_str()
+    cur = db.execute("""
+        INSERT INTO stock_counts (name, scope, status, username, created_at)
+        VALUES (?, ?, 'open', ?, ?)
+    """, (name, scope_label, session.get("username", ""), ts))
+    cid = cur.lastrowid
+    for p in products:
+        # 建立當下就固定系統帳,之後的進出不影響本次盤點的比較基準
+        db.execute("""
+            INSERT INTO stock_count_items (count_id, product_id, system_qty)
+            VALUES (?, ?, ?)
+        """, (cid, p["id"], p["quantity"]))
+    audit("建立盤點單", "盤點", cid, f"{name}({scope_label},{len(products)} 項)")
+    db.commit()
+    return redirect(url_for("count_detail", cid=cid))
+
+
+def render_count_detail(cid, error=None, msg=None):
+    db = get_db()
+    c = db.execute("SELECT * FROM stock_counts WHERE id = ?", (cid,)).fetchone()
+    if c is None:
+        return counts_page(error="找不到指定的盤點單")
+    cd = dict(c)
+    cd["created_local"] = fmt_local(c["created_at"])
+    cd["posted_local"] = fmt_local(c["posted_at"]) if c["posted_at"] else ""
+    cd["accuracy_str"] = fmt_num(c["accuracy"]) if c["accuracy"] is not None else "—"
+    items = []
+    for r in db.execute("""
+            SELECT i.*, p.sku, p.name, p.location FROM stock_count_items i
+            JOIN products p ON i.product_id = p.id
+            WHERE i.count_id = ? ORDER BY p.id
+        """, (cid,)).fetchall():
+        d = dict(r)
+        d["diff"] = (r["counted_qty"] - r["system_qty"]) if r["counted_qty"] is not None else None
+        items.append(d)
+    counted = sum(1 for i in items if i["counted_qty"] is not None)
+    diff_count = sum(1 for i in items if i["diff"] not in (None, 0))
+    return render_page(PAGE_COUNT_DETAIL, c=cd, items=items, total=len(items),
+                       counted=counted, diff_count=diff_count, error=error, msg=msg)
+
+
+@app.route("/counts/<int:cid>")
+@login_required
+def count_detail(cid):
+    return render_count_detail(cid)
+
+
+@app.route("/counts/<int:cid>/count", methods=["POST"])
+@login_required
+def count_record(cid):
+    # 現場人員(一般使用者)即可記錄實盤數;只有過帳需要管理員
+    db = get_db()
+    c = db.execute("SELECT status FROM stock_counts WHERE id = ?", (cid,)).fetchone()
+    if c is None:
+        return counts_page(error="找不到指定的盤點單")
+    if c["status"] == "posted":
+        return render_count_detail(cid, error="此盤點單已過帳,不可再修改")
+    pid = safe_int(request.form.get("product_id", ""))
+    qty = safe_int(request.form.get("counted_qty", ""))
+    note = request.form.get("note", "").strip()
+    if pid is None:
+        return render_count_detail(cid, error="請指定商品")
+    if qty is None or qty < 0:
+        return render_count_detail(cid, error="實盤數必須為 0 或正整數")
+    if qty > MAX_QUANTITY:
+        return render_count_detail(cid, error="實盤數過大,請確認輸入")
+    db.execute("""
+        UPDATE stock_count_items SET counted_qty = ?, note = ?, counted_at = ?
+        WHERE count_id = ? AND product_id = ?
+    """, (qty, note, now_str(), cid, pid))
+    db.commit()
+    return redirect(url_for("count_detail", cid=cid))
+
+
+@app.route("/counts/<int:cid>/post", methods=["POST"])
+@admin_required
+def count_post(cid):
+    db = get_db()
+    c = db.execute("SELECT * FROM stock_counts WHERE id = ?", (cid,)).fetchone()
+    if c is None:
+        return counts_page(error="找不到指定的盤點單")
+    if c["status"] == "posted":
+        return render_count_detail(cid, error="此盤點單已過帳,不可重複過帳")
+    items = db.execute("""
+        SELECT i.*, p.quantity AS current_qty FROM stock_count_items i
+        JOIN products p ON i.product_id = p.id
+        WHERE i.count_id = ? AND i.counted_qty IS NOT NULL
+    """, (cid,)).fetchall()
+    if not items:
+        return render_count_detail(cid, error="尚未輸入任何實盤數,無法過帳")
+    ts = now_str()
+    adjusted = matched = 0
+    for it in items:
+        diff = it["counted_qty"] - it["current_qty"]   # 以過帳當下的庫存為準才不會蓋掉期間的進出
+        if diff == 0:
+            matched += 1
+            continue
+        adjusted += 1
+        pid = it["product_id"]
+        note = f"盤點調整({c['name']})" + (f":{it['note']}" if it["note"] else "")
+        if diff > 0:
+            # 盤盈:補一筆入庫並建立調整批,批次帳才會跟著對上
+            db.execute("UPDATE products SET quantity = quantity + ? WHERE id = ?", (diff, pid))
+            cur = db.execute("""
+                INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at)
+                VALUES (?, ?, 'in', ?, ?, '盤點調整', ?)
+            """, (pid, session["user_id"], diff, note, ts))
+            tx_id = cur.lastrowid
+            db.execute("""
+                INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                                  qty_remaining, note, received_at)
+                VALUES (?, ?, ?, ?, ?, '盤盈調整批', ?)
+            """, (pid, tx_id, f"CNT{cid}-{tx_id}", diff, diff, ts))
+        else:
+            # 盤虧:走與出庫相同的批次消耗路徑,維持恆等式
+            loss = -diff
+            db.execute("UPDATE products SET quantity = quantity - ? WHERE id = ? AND quantity >= ?",
+                       (loss, pid, loss))
+            cur = db.execute("""
+                INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at)
+                VALUES (?, ?, 'out', ?, ?, '盤點調整', ?)
+            """, (pid, session["user_id"], loss, note, ts))
+            consume_lots(db, pid, loss, cur.lastrowid, ts)
+    total_counted = matched + adjusted
+    accuracy = (matched / total_counted * 100) if total_counted else 0.0
+    db.execute("""
+        UPDATE stock_counts SET status = 'posted', posted_at = ?, accuracy = ? WHERE id = ?
+    """, (ts, accuracy, cid))
+    audit("盤點過帳", "盤點", cid,
+          f"{c['name']}:盤點 {total_counted} 項,相符 {matched} 項,調整 {adjusted} 項,準確率 {accuracy:.1f}%")
+    db.commit()
+    return render_count_detail(cid, msg=f"過帳完成:調整 {adjusted} 項,庫存準確率 {accuracy:.1f}%")
+
+
+# ---------------------------------------------------------------------------
+# 預留 / 可用量
+# ---------------------------------------------------------------------------
+
+@app.route("/reservations")
+@login_required
+def reservations_page(error=None, msg=None):
+    db = get_db()
+    resv = reserved_map()
+    product_list = []
+    for p in db.execute("SELECT id, name, sku, quantity, unit FROM products ORDER BY name").fetchall():
+        d = dict(p)
+        d["available"] = p["quantity"] - resv.get(p["id"], 0)
+        product_list.append(d)
+    rows = []
+    for r in db.execute("""
+            SELECT r.*, p.name, p.sku FROM reservations r JOIN products p ON r.product_id = p.id
+            WHERE r.status = 'active' ORDER BY r.id DESC
+        """).fetchall():
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        rows.append(d)
+    return render_page(PAGE_RESERVATIONS, rows=rows, product_list=product_list,
+                       error=error, msg=msg)
+
+
+@app.route("/reservations/new", methods=["POST"])
+@login_required
+def reservation_new():
+    pid = safe_int(request.form.get("product_id", ""))
+    qty = safe_int(request.form.get("quantity", ""))
+    purpose = request.form.get("purpose", "").strip()
+    if pid is None:
+        return reservations_page(error="請選擇商品")
+    if qty is None or qty <= 0:
+        return reservations_page(error="預留數量必須為正整數")
+    if qty > MAX_QUANTITY:
+        return reservations_page(error="預留數量過大,請確認輸入")
+    db = get_db()
+    row = db.execute("SELECT name, quantity FROM products WHERE id = ?", (pid,)).fetchone()
+    if row is None:
+        return reservations_page(error="找不到指定的商品")
+    available = row["quantity"] - reserved_qty(pid)
+    if qty > available:
+        return reservations_page(
+            error=f"可用量不足,無法預留(目前可用 {available},要求預留 {qty})")
+    db.execute("""
+        INSERT INTO reservations (product_id, quantity, purpose, username, status, created_at)
+        VALUES (?, ?, ?, ?, 'active', ?)
+    """, (pid, qty, purpose, session.get("username", ""), now_str()))
+    audit("建立預留", "商品", pid, f"{row['name']} ×{qty}" + (f"({purpose})" if purpose else ""))
+    db.commit()
+    return redirect(url_for("reservations_page"))
+
+
+@app.route("/reservations/<int:rid>/release", methods=["POST"])
+@login_required
+def reservation_release(rid):
+    db = get_db()
+    row = db.execute("SELECT * FROM reservations WHERE id = ?", (rid,)).fetchone()
+    if row is None or row["status"] != "active":
+        return reservations_page(error="找不到有效的預留紀錄")
+    db.execute("UPDATE reservations SET status = 'released', released_at = ? WHERE id = ?",
+               (now_str(), rid))
+    audit("釋放預留", "商品", row["product_id"], f"預留 #{rid} ×{row['quantity']}")
+    db.commit()
+    return redirect(url_for("reservations_page"))
+
+
+# ---------------------------------------------------------------------------
+# 存貨規劃:安全庫存建議(依用量變異推導,取代憑印象填的固定門檻)
+# ---------------------------------------------------------------------------
+
+def planning_rows():
+    rows = []
+    for p in get_db().execute("SELECT * FROM products ORDER BY id").fetchall():
+        d = dict(p)
+        stats = usage_stats(p["id"])
+        ss, rop = suggest_safety_stock(p, stats)
+        xyz, cv = xyz_class(stats)
+        d["stats"], d["ss"], d["rop"], d["xyz"], d["cv"] = stats, ss, rop, xyz, cv
+        d["mean_str"] = fmt_num(stats["mean"]) if stats else "—"
+        d["sd_str"] = fmt_num(stats["sd"]) if stats else "—"
+        d["ss_str"] = str(ss) if ss is not None else "—"
+        d["rop_str"] = str(rop) if rop is not None else "—"
+        d["service_level_str"] = fmt_num(p["service_level"] or 95)
+        rows.append(d)
+    return rows
+
+
+@app.route("/planning")
+@login_required
+def planning_page(error=None, msg=None):
+    rows = planning_rows()
+    return render_page(PAGE_PLANNING, rows=rows, window=USAGE_WINDOW_DAYS,
+                       has_suggestion=any(r["ss"] is not None for r in rows),
+                       error=error, msg=msg)
+
+
+@app.route("/planning/apply", methods=["POST"])
+@admin_required
+def planning_apply():
+    db = get_db()
+    applied = 0
+    for r in planning_rows():
+        if r["ss"] is None:
+            continue
+        db.execute("UPDATE products SET low_stock_threshold = ? WHERE id = ?", (r["ss"], r["id"]))
+        applied += 1
+    audit("套用安全庫存建議", "規劃", "", f"更新 {applied} 項商品的低庫存門檻")
+    db.commit()
+    return planning_page(msg=f"已將 {applied} 項商品的低庫存門檻更新為建議安全庫存")
+
+
+# ---------------------------------------------------------------------------
+# QR 料架標籤
+# ---------------------------------------------------------------------------
+
+@app.route("/products/<int:pid>/qr.png")
+@login_required
+def product_qr(pid):
+    if not HAS_QRCODE:
+        return Response("需要安裝 qrcode 套件", status=503, mimetype="text/plain")
+    # QR 內容是該商品詳細頁的完整網址:手機掃了就直接開頁面登記進出
+    target = url_for("product_detail", pid=pid, _external=True)
+    img = qrcode.make(target)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png",
+                    headers={"Cache-Control": "max-age=3600"})
+
+
+@app.route("/labels")
+@login_required
+def labels_page():
+    products = get_db().execute(
+        "SELECT id, sku, name, location FROM products ORDER BY location, sku").fetchall()
+    return render_page(PAGE_LABELS, products=products, has_qrcode=HAS_QRCODE)
 
 
 # ---------------------------------------------------------------------------
@@ -2352,12 +3324,14 @@ def csv_response(header, data_rows, filename):
 @login_required
 def export_inventory():
     rows = query_products(limit=None)
-    data = [(r["sku"], r["name"], r["category"], r["unit"], fmt_num(r["unit_price"]),
-             r["quantity"], r["low_stock_threshold"], r["supplier_name"] or "",
+    data = [(r["sku"], r["name"], r["location"] or "", r["category"], r["unit"],
+             fmt_num(r["unit_price"]), r["quantity"], r["reserved"], r["available"],
+             r["low_stock_threshold"], r["supplier_name"] or "",
              fmt_num(r["quantity"] * r["unit_price"])) for r in rows]
     filename = f"inventory_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
     return csv_response(
-        ["SKU", "名稱", "分類", "單位", "單價", "目前庫存", "低庫存門檻", "供應商", "庫存價值"],
+        ["SKU", "名稱", "儲位", "分類", "單位", "單價", "現貨量", "預留量", "可用量",
+         "低庫存門檻", "供應商", "庫存價值"],
         data, filename)
 
 
@@ -2367,11 +3341,11 @@ def export_transactions():
     rows = query_transactions(history_filters(), limit=None)
     data = [(fmt_local(r["created_at"]), "入庫" if r["type"] == "in" else "出庫", r["sku"],
              r["product_name"], r["quantity"], r["unit"], r["lot_info"] or "",
-             r["note"], r["username"])
+             r["purpose"] or "", r["note"], r["username"])
             for r in rows]
     filename = f"transactions_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
     return csv_response(
-        ["時間(台灣)", "類型", "SKU", "商品名稱", "數量", "單位", "批次", "備註", "操作人員"],
+        ["時間(台灣)", "類型", "SKU", "商品名稱", "數量", "單位", "批次", "用途／工單", "備註", "操作人員"],
         data, filename)
 
 

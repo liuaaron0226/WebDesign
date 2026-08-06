@@ -88,7 +88,7 @@
   - 驗證:`curl -s -b /tmp/inv_cookies.txt -o /tmp/inv.csv -w "%{content_type}" http://localhost:5002/export/inventory.csv` 含 `text/csv`;`python3 -c "print(open('/tmp/inv.csv','rb').read(3)==b'\xef\xbb\xbf')"` 為 `True`;`grep 可樂 /tmp/inv.csv`;`/export/transactions.csv` 同法驗 BOM 且 grep `首批進貨`。
 - [ ] **登出後失去存取權**。
   - 驗證:`curl -s -b /tmp/inv_cookies.txt -c /tmp/inv_cookies.txt -o /dev/null http://localhost:5002/logout` 後,`curl -s -b /tmp/inv_cookies.txt -o /dev/null -w "%{http_code}" http://localhost:5002/history` 為 `302`。
-- [ ] **Render 綁定與依賴管理**:`host="0.0.0.0"` 與 port 讀 `$PORT`(預設 5000)的契約不變(第四階段起由 waitress 提供服務,未安裝時 fallback 到 `app.run`);`requirements.txt` 維持 UTF-16 編碼且 pip 可解析,內容為 Flask + Pillow(以圖搜圖)+ waitress(正式伺服器)。
+- [ ] **Render 綁定與依賴管理**:`host="0.0.0.0"` 與 port 讀 `$PORT`(預設 5000)的契約不變(第四階段起由 waitress 提供服務,未安裝時 fallback 到 `app.run`);`requirements.txt` 維持 UTF-16 編碼且 pip 可解析,內容為 Flask + Pillow(以圖搜圖)+ waitress(正式伺服器)+ qrcode(料架標籤)。
   - 驗證:`grep -c 'host="0.0.0.0"' inventory_app.py` ≥ 1、`grep -n 'PORT' inventory_app.py` 有結果;`python3 -c "print(open('requirements.txt','rb').read(2))"` 為 `b'\xff\xfe'`;`python3 -c "print('Pillow' in open('requirements.txt', encoding='utf-16').read())"` 為 `True`;`pip install -r requirements.txt --dry-run` 成功。
 - [ ] **inventory.db 不入版控**。
   - 驗證:`grep -n 'inventory.db' .gitignore` 有結果;`git status --porcelain | grep inventory.db` 為空。
@@ -207,6 +207,75 @@
 - [ ] **自動化測試全綠**:`test_inventory.py` 覆蓋 FIFO、批次帳恆等式、加權平均成本、ABC、庫齡、權限、輸入邊界、CSV 匯入韌性、公式注入防護。
   - 驗證:`python3 test_inventory.py` 結束碼為 `0` 且輸出含 `OK`。
 - [ ] **既有 104 檢查點全數回歸**:Patrick、一階段、二階段、三階段所有條目重測通過。
+  - 驗證:執行本清單全部項目。
+
+## 庫存系統第五階段:業界標準功能補完(盤點/儲位/QR/預留/單位/安全庫存/XYZ/效期/歸屬)
+
+> 條目來源:業界系統(SAP EWM、Odoo、WMS 實務、台灣 ERP)與學術文獻(IRI 研究、安全庫存公式、ABC-XYZ)的差距分析。
+> 接續上節測試序列;需要新測試資料的條目會自行建立。
+
+### 循環盤點與差異調整(帳實相符的核心機制)
+
+- [ ] **可建立盤點單並依範圍帶入商品**:支援全部商品、依 ABC 分級、依分類三種範圍。
+  - 驗證:管理員 POST `/counts/new`(`name=測試盤點`, `scope=all`)回 `302`;`/counts` 列表含「測試盤點」;盤點單頁面列出的品項數等於商品總數。
+- [ ] **輸入實盤數即時顯示差異**:輸入與系統帳不同的數量後,盤點頁顯示差異數。
+  - 驗證:POST `/counts/<id>/count`(`product_id=1`, `counted_qty=<系統帳-3>`)後,盤點頁含「-3」。
+- [ ] **過帳自動修正帳並維持批次帳恆等式**:盤虧依 FIFO 消耗批次、盤盈建立調整批;過帳後 `products.quantity` 等於實盤數,且批次剩餘總和仍等於庫存。
+  - 驗證:過帳後查 sqlite:該商品 `quantity` 等於實盤數;全商品 `SUM(lots.qty_remaining) == quantity` 無例外;`/history` 出現「盤點調整」異動。
+- [ ] **過帳留下稽核軌跡且不可重複過帳**:
+  - 驗證:`/audit` 含「盤點過帳」;對同一張已過帳的盤點單再次 POST `/counts/<id>/post` 輸出含「已過帳」。
+- [ ] **庫存準確率 KPI**:報表顯示最近一次盤點的準確率(相符品項數 ÷ 盤點品項數)。
+  - 驗證:`/report` 輸出含「庫存準確率」與百分比數值。
+- [ ] **一般使用者可盤點但不可過帳**:
+  - 驗證:staff cookie POST `/counts/<id>/count` 為 `302`;POST `/counts/<id>/post` 為 `403`。
+
+### 儲位與 QR 標籤(現場作業)
+
+- [ ] **商品可設定儲位並可用儲位搜尋**:
+  - 驗證:編輯商品設 `location=A-03-2` 後,首頁 `?q=A-03-2` 找得到該商品;商品詳細頁顯示該儲位。
+- [ ] **QR 標籤可產生**:`/products/<id>/qr.png` 回傳 PNG 圖檔。
+  - 驗證:`curl -o /tmp/qr.png -w "%{content_type}"` 含 `image/png`;檔案前 8 bytes 為 PNG 簽章 `\x89PNG\r\n\x1a\n`。
+- [ ] **標籤列印頁列出所有商品的 QR 與儲位**:
+  - 驗證:GET `/labels` 為 `200`,含 `<img` 且含料號與儲位文字。
+- [ ] **掃 QR 可直達商品頁**:QR 內容為該商品詳細頁的完整網址。
+  - 驗證:讀碼確認 QR 內容以 `/products/<id>` 結尾(可用 python 解碼或讀碼驗證產生邏輯)。
+
+### 單位換算與領用歸屬
+
+- [ ] **可設定採購單位與換算率,入庫時自動換算**:設「1 箱 = 100 個」後,以採購單位入庫 2,庫存增加 200。
+  - 驗證:編輯商品設 `purchase_unit=箱`、`units_per_purchase=100`;POST `/stock/in`(`quantity=2`, `qty_unit=purchase`)後庫存增加 `200`,異動紀錄數量為 `200`。
+- [ ] **出庫可填結構化用途(工單/部門)並可篩選**:
+  - 驗證:POST `/stock/out` 帶 `purpose=WO-1001`;`/history` 顯示 `WO-1001`;`/history?purpose=WO-1001` 只含該筆(用途含中文時,curl 須用 `--get --data-urlencode` 編碼)。
+
+### 預留與可用量
+
+- [ ] **可建立預留,首頁顯示可用量 = 現貨 − 預留**:
+  - 驗證:對庫存 N 的商品 POST `/reservations/new`(`quantity=5`)回 `302`;首頁該商品可用量欄顯示 `N-5`;`id="qty-<id>"`(現貨)維持 `N`。
+- [ ] **預留可釋放,釋放後可用量回復**:
+  - 驗證:POST `/reservations/<id>/release` 回 `302`;可用量回到 `N`。
+- [ ] **預留量不可超過現貨**:
+  - 驗證:預留數量大於現貨時輸出含「可用量不足」,且未建立預留。
+- [ ] **低庫存警示改以可用量判斷**:
+  - 驗證:讀碼確認警示查詢使用可用量;預留使可用量低於門檻時,`/alerts` 列出該商品。
+
+### 安全庫存推導、ABC-XYZ、效期
+
+- [ ] **系統依用量變異推導建議安全庫存**:規劃頁列出每個有用量歷史的商品的日均用量、標準差、建議門檻。
+  - 驗證:GET `/planning` 為 `200`,含「建議安全庫存」「日均用量」與服務水準說明;有出庫歷史的商品顯示數值而非「—」。
+- [ ] **可一鍵套用建議門檻**:
+  - 驗證:POST `/planning/apply` 回 `302`;該商品 `low_stock_threshold` 變為建議值(以 sqlite 比對)。
+- [ ] **前置期與服務水準可設定並影響建議值**:
+  - 驗證:把商品 `lead_time_days` 由 7 改為 28 後,`/planning` 的建議值變大(前置期越長需備越多)。
+- [ ] **ABC-XYZ 九宮格**:報表顯示每個商品的 XYZ 分級(依需求變異係數)與 ABC-XYZ 組合。
+  - 驗證:`/report` 含「XYZ」與 `AX`/`AZ`/`CX`/`CZ` 之類的組合標示。
+- [ ] **批次可記錄有效期,即將到期會警示**:
+  - 驗證:入庫時帶 `expiry_date`(設為 10 天後)後,`/alerts` 含「即將到期」與該批號。
+- [ ] **FEFO 策略:設為 FEFO 的商品出庫先出最早到期批**:
+  - 驗證:建立商品設 `issue_strategy=FEFO`;先入一批效期較晚、再入一批效期較早,出庫後以 sqlite 確認**效期較早的批**先被消耗。
+
+### 回歸
+
+- [ ] **既有全部條目回歸**:Patrick、一~四階段所有條目重測通過,`python test_inventory.py` 全綠。
   - 驗證:執行本清單全部項目。
 
 ## 使用者自訂要求(請在此新增你在意的驗收項目)
