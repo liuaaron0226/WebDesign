@@ -63,7 +63,11 @@ db.sqlite3-journal
 
 # 庫存管理系統資料庫與照片(inventory_app.py 產生,不入版控)
 inventory.db
+inventory.db-wal
+inventory.db-shm
 inventory_images/
+secret_key.txt
+backups/
 
 # Flask stuff:
 instance/

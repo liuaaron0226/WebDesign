@@ -19,5 +19,6 @@ python3 -m pip install -r requirements.txt --quiet
 echo "[2/3] 本機內網 IP 如下(同事請用 192.168.x.x 或 10.x.x.x 開頭的位址加 :5000):"
 (ip -4 addr 2>/dev/null || ifconfig 2>/dev/null) | grep -oE 'inet (addr:)?[0-9.]+' | grep -v '127.0.0.1' || true
 
+echo "資料保存位置(請定期備份):inventory.db、inventory_images/、backups/"
 echo "[3/3] 啟動庫存管理系統(Ctrl+C 停止)..."
 python3 inventory_app.py
