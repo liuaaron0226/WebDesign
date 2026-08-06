@@ -1818,6 +1818,10 @@ def register():
 def login():
     error = None
     username = ""
+    # 首次啟動(一個帳號都還沒有)直接帶到建立管理員頁:
+    # 全新安裝的人卡在登入畫面卻沒有帳號可填,是實機裝機時最常見的卡關點。
+    if request.method == "GET" and user_count() == 0:
+        return redirect(url_for("register"))
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")

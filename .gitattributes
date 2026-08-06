@@ -1,0 +1,7 @@
+# Windows 批次檔必須是 CRLF,否則 cmd.exe 無法正確解析
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Shell 腳本必須是 LF
+*.sh text eol=lf
+# requirements.txt 是 UTF-16,交給 git 當二進位以免被改動編碼
+requirements.txt -text
