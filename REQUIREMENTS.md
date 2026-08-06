@@ -71,12 +71,37 @@
   - 驗證:`curl -s -b /tmp/inv_cookies.txt -o /tmp/inv.csv -w "%{content_type}" http://localhost:5002/export/inventory.csv` 含 `text/csv`;`python3 -c "print(open('/tmp/inv.csv','rb').read(3)==b'\xef\xbb\xbf')"` 為 `True`;`grep 可樂 /tmp/inv.csv`;`/export/transactions.csv` 同法驗 BOM 且 grep `首批進貨`。
 - [ ] **登出後失去存取權**。
   - 驗證:`curl -s -b /tmp/inv_cookies.txt -c /tmp/inv_cookies.txt -o /dev/null http://localhost:5002/logout` 後,`curl -s -b /tmp/inv_cookies.txt -o /dev/null -w "%{http_code}" http://localhost:5002/history` 為 `302`。
-- [ ] **Render 綁定與零新依賴**:`app.run` 保持 `host="0.0.0.0"`、port 讀 `$PORT`(預設 5000);`requirements.txt` 完全未被修改。
-  - 驗證:`grep -n 'host="0.0.0.0"' inventory_app.py` 與 `grep -n 'PORT' inventory_app.py` 皆有;`git diff --stat requirements.txt` 為空且 `python3 -c "print(open('requirements.txt','rb').read(2))"` 仍為 `b'\xff\xfe'`。
+- [ ] **Render 綁定與依賴管理**:`app.run` 保持 `host="0.0.0.0"`、port 讀 `$PORT`(預設 5000);`requirements.txt` 維持 UTF-16 編碼且 pip 可解析,內容為 Flask + Pillow(以圖搜圖需要),無其他新增依賴。
+  - 驗證:`grep -n 'host="0.0.0.0"' inventory_app.py` 與 `grep -n 'PORT' inventory_app.py` 皆有;`python3 -c "print(open('requirements.txt','rb').read(2))"` 為 `b'\xff\xfe'`;`python3 -c "print('Pillow' in open('requirements.txt', encoding='utf-16').read())"` 為 `True`;`pip install -r requirements.txt --dry-run` 成功。
 - [ ] **inventory.db 不入版控**。
   - 驗證:`grep -n 'inventory.db' .gitignore` 有結果;`git status --porcelain | grep inventory.db` 為空。
 - [ ] **原 Patrick app 不受影響**:上方「功能驗收」「部署約束」全部條目(PORT=5001)回歸通過。
   - 驗證:執行本清單上半部所有項目。
+
+## 庫存系統第二階段:料號整合、照片、以圖搜圖、快速登記、內網限制
+
+> 接續上節測試序列執行(同一個測試 DB;上節結尾已登出,本節開頭先重新登入)。照片目錄用 `INVENTORY_IMAGES=/tmp/verify_inventory_images` 啟動,每輪驗收先 `rm -rf` 該目錄。測試圖以 PIL 產生(純紅色 vs 黑白漸層,兩張截然不同)。
+
+- [ ] **商品詳細頁**:GET `/products/1` 包含品名、庫存、「照片」區、「跨公司料號對照」區、「近期異動」區。
+  - 驗證:重新登入後 `curl -s -b /tmp/inv_cookies.txt http://localhost:5002/products/1` 輸出含「可樂」「照片」「跨公司料號對照」「近期異動」。
+- [ ] **跨公司料號別名:新增、用別名搜尋找到本尊、重複組合被拒**。
+  - 驗證:`curl -s -b /tmp/inv_cookies.txt -o /dev/null -w "%{http_code}" -X POST http://localhost:5002/products/1/aliases --form-string "company=台達電" --form-string "alias_sku=DELTA-123"` 為 `302`;`curl -s -b /tmp/inv_cookies.txt --get --data-urlencode "q=DELTA-123" http://localhost:5002/ | grep SKU001`;重送同組合輸出含「此公司+料號組合已存在」。
+- [ ] **CSV 商品匯入(UTF-8)**:匯入 2 筆新商品(含初始庫存)成功,重複 SKU 列被跳過並回報行號原因;初始庫存產生 `in` 異動(note=CSV匯入)。
+  - 驗證:製作 UTF-8 CSV(標題列 `SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存`,含 SKU002 滑鼠/庫存 30、SKU003 鍵盤/庫存 20、SKU001 重複列),`curl -s -b /tmp/inv_cookies.txt -X POST http://localhost:5002/import -F "mode=products" -F "csv_file=@/tmp/test_products.csv"` 輸出含「成功匯入 2 筆」與「SKU 已存在」;首頁 grep `id="qty-2">30<`;`/history` 含「CSV匯入」。
+- [ ] **CSV 商品匯入(cp950/Big5,台灣 Excel 編碼)**:cp950 編碼的 CSV 也能正確匯入中文。
+  - 驗證:以 Python 產生 cp950 編碼 CSV(SKU004 螢幕),匯入後首頁 grep `SKU004` 與 `螢幕`。
+- [ ] **CSV 別名匯入**:匯入後用別名料號搜尋找得到本尊商品。
+  - 驗證:製作別名 CSV(標題列 `我方SKU,公司,別名料號,備註`,一列 `SKU002,群光,CHICONY-M100,`),匯入輸出含「成功匯入 1 筆」;`/?q=CHICONY-M100` grep `SKU002`。
+- [ ] **照片上傳與顯示**:上傳 PNG 到商品後詳細頁出現 `<img`,檔案落在照片目錄;非圖片副檔名被拒。
+  - 驗證:PIL 產生 `/tmp/red.png`(純紅)上傳 `curl -s -b /tmp/inv_cookies.txt -o /dev/null -w "%{http_code}" -X POST http://localhost:5002/products/1/images -F "photo=@/tmp/red.png"` 為 `302`;`/products/1` 含 `<img`;`ls /tmp/verify_inventory_images/ | grep -c png` ≥ 1;上傳 `.txt` 檔輸出含「不支援的檔案格式」。
+- [ ] **以圖搜圖:最相似者排第一**:兩張截然不同的照片分掛兩商品後,用與其中一張相近的圖搜尋,第一名必須是掛該照片的商品。
+  - 驗證:PIL 產生 `/tmp/gradient.png`(黑白漸層)上傳到商品 2;再以 `/tmp/red_query.png`(接近純紅、少量雜訊)POST `/search/image`,回應中 SKU001 出現位置早於 SKU002,且含「相似度」。
+- [ ] **連續登記便利**:入庫成功後 302 導回入庫頁並顯示成功訊息(含品名與最新庫存),出庫同理。
+  - 驗證:`curl -s -b /tmp/inv_cookies.txt -i -X POST http://localhost:5002/stock/in --form-string "product_id=1" --form-string "quantity=10" --form-string "note=連續登記測試" | grep -i "^location:"` 含 `/stock/in`;跟隨 redirect 後頁面含「入庫成功」與「目前庫存」。
+- [ ] **ALLOWED_IPS 內網白名單**:未設定時行為完全不變(本清單其他條目即為證明);設定後非名單來源一律 403,名單內來源正常。
+  - 驗證:另啟動一個實例 `ALLOWED_IPS=203.0.113.5 INVENTORY_DB=/tmp/verify_inventory.db PORT=5003 python inventory_app.py`;`curl -s -o /dev/null -w "%{http_code}" http://localhost:5003/` 為 `403` 且回應含「僅限公司內部網路」;`curl -s -o /dev/null -w "%{http_code}" -H "X-Forwarded-For: 203.0.113.5" http://localhost:5003/` 為 `302`(正常導向登入)。測畢 kill 該實例。
+- [ ] **內網部署啟動腳本存在且正確**:`start_inventory.bat`(Windows)與 `start_inventory.sh`(Mac/Linux)皆存在,內容含依賴安裝與 `python inventory_app.py` 啟動(讀碼驗證)。
+  - 驗證:`grep -l "inventory_app.py" start_inventory.bat start_inventory.sh` 列出兩檔;`bash -n start_inventory.sh` 無語法錯誤。
 
 ## 使用者自訂要求(請在此新增你在意的驗收項目)
 

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repository contains **two independent single-file Flask apps** (UI and comments in Traditional Chinese; neither imports the other):
 
 1. `patrick_method_solver.py` — solves the Petrick's (Patrick) Method for minimal SOP (Sum of Products) Boolean simplification, supporting both single- and multiple-output problems.
-2. `inventory_app.py` — a full inventory management system (庫存管理系統): multi-user auth, product & supplier CRUD, stock-in/out, search, low-stock alerts, transaction history, reports, and CSV export. Data lives in SQLite.
+2. `inventory_app.py` — a full inventory management system (庫存管理系統): multi-user auth, product & supplier CRUD, stock-in/out, search, low-stock alerts, transaction history, reports, CSV export/import, cross-company part-number aliases, product photos, and image-similarity search (以圖搜圖, dHash). Data lives in SQLite; photos on disk.
 
 ## Commands
 
@@ -34,11 +34,15 @@ Note: `requirements.txt` is UTF-16 encoded (saved on Windows). `pip` handles it,
 
 Single file: routes, SQLite schema, and inline HTML (a shared `LAYOUT` string + per-page body fragments assembled by `render_page()`).
 
-- **Storage**: SQLite at `inventory.db` (gitignored), path overridable via `INVENTORY_DB` env var — the `/verify` loop uses `INVENTORY_DB=/tmp/verify_inventory.db` for a clean, reproducible DB. Tables (`users`, `suppliers`, `products`, `transactions`) are created idempotently by `init_db()` at startup. Current stock is stored in `products.quantity` and updated in the same SQL transaction as the `transactions` insert; stock-out uses an atomic `UPDATE ... WHERE quantity >= ?` so stock can never go negative.
+- **Storage**: SQLite at `inventory.db` (gitignored), path overridable via `INVENTORY_DB` env var — the `/verify` loop uses `INVENTORY_DB=/tmp/verify_inventory.db` for a clean, reproducible DB. Tables (`users`, `suppliers`, `products`, `transactions`, `part_aliases`, `product_images`) are created idempotently by `init_db()` at startup. Product photos live under `inventory_images/` (gitignored, overridable via `INVENTORY_IMAGES`). Current stock is stored in `products.quantity` and updated in the same SQL transaction as the `transactions` insert; stock-out uses an atomic `UPDATE ... WHERE quantity >= ?` so stock can never go negative.
 - **Auth**: session-based; passwords hashed with `werkzeug.security`. The first registered user becomes admin (`is_admin=1`). `SECRET_KEY` env var should be set in production (dev fallback exists). `/logout` is GET and there is no CSRF token — a deliberate simplification for curl testability, documented in code comments.
-- **Flow convention**: successful POSTs redirect (302, PRG pattern); validation failures re-render the same page with HTTP 200 and an inline error message (so curl can grep for it). No JavaScript dependency anywhere.
+- **Flow convention**: successful POSTs redirect (302, PRG pattern); validation failures re-render the same page with HTTP 200 and an inline error message (so curl can grep for it). No JavaScript dependency anywhere. Stock-in/out redirect back to their own form with a success message for rapid consecutive entry.
+- **Part-number aliases (跨公司料號)**: `part_aliases` maps other companies' part numbers to our products (`UNIQUE(company, alias_sku)`); the home-page search matches our SKU, name, AND alias SKU/company, so any company's part number finds the same product.
+- **Image similarity search (以圖搜圖)**: photos get a 64-bit dHash (`compute_dhash`, Pillow) stored in `product_images.phash`; `/search/image` ranks all photos by Hamming distance, top-10 with similarity %. Pillow missing → app still boots, feature politely disabled (`HAS_PIL`). Pillow is the only dependency beyond Flask (added to the UTF-16 `requirements.txt` — always edit that file via bytes→decode('utf-16')→re-encode to preserve BOM).
+- **CSV import** (`/import`): products (initial stock recorded as an `in` transaction with note `CSV匯入`, suppliers auto-created) and aliases; encodings tried in order utf-8-sig → cp950 (Taiwanese Excel Big5); per-row success/skip report with line numbers.
+- **Intranet restriction**: `ALLOWED_IPS` env var (comma-separated) enables an IP allowlist in `before_request` — non-listed sources get 403 (client IP = first `X-Forwarded-For` value; designed for the cloud-behind-proxy scenario; unset = off, which is correct for true intranet deployment where the network itself is the boundary).
 - **CSV export**: UTF-8 with BOM prefix (`\ufeff`) so Excel on Windows renders Chinese correctly.
-- **Deployment note**: on Render's free tier the disk is ephemeral — `inventory.db` is wiped on every redeploy/restart. For real persistence attach a Render Disk or use an external database. Deploy as a second Render service with start command `python inventory_app.py`.
+- **Deployment**: two supported routes. (A) Company intranet machine — run `start_inventory.bat` (Windows) / `start_inventory.sh` (Mac/Linux); data and photos persist on that machine; colleagues browse `http://<internal-ip>:5000`. (B) Render second service (start command `python inventory_app.py`) + `ALLOWED_IPS` set to the company's fixed public IP; note Render free tier disk is ephemeral — `inventory.db` AND photos are wiped on every redeploy/restart (attach a Render Disk for persistence).
 
 ## Architecture — solver app (`patrick_method_solver.py`)
 

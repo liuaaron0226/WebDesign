@@ -1,19 +1,28 @@
 # inventory_app.py
 # 庫存管理系統(完整版)— 單檔 Flask 應用
 # 功能:多使用者帳號、商品管理、供應商管理、入庫/出庫、庫存查詢與搜尋、
-#       低庫存警示、異動歷史、進出統計報表、CSV 匯出
+#       低庫存警示、異動歷史、進出統計報表、CSV 匯出、
+#       跨公司料號對照(別名)、物料照片、以圖搜圖(dHash)、CSV 匯入、內網 IP 白名單
 # 與 patrick_method_solver.py 完全獨立,互不 import。
 
 import csv
 import io
 import os
+import secrets
 import sqlite3
 from datetime import datetime, timezone
 from functools import wraps
 
 from flask import (Flask, Response, g, redirect, render_template_string,
-                   request, session, url_for)
+                   request, send_from_directory, session, url_for)
 from werkzeug.security import check_password_hash, generate_password_hash
+
+# Pillow 供以圖搜圖使用;缺席時 app 仍可啟動,僅該功能停用
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 app = Flask(__name__)
 # 正式環境務必在 Render 環境變數設定 SECRET_KEY,否則 session 可被偽造
@@ -21,6 +30,30 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-inventory-secret-change-me")
 
 # 資料庫路徑可用環境變數覆蓋,驗收測試用 /tmp 下的乾淨 DB
 DB_PATH = os.environ.get("INVENTORY_DB", "inventory.db")
+
+# 物料照片存放目錄(gitignored),同樣可用環境變數覆蓋
+IMAGE_DIR = os.path.abspath(os.environ.get("INVENTORY_IMAGES", "inventory_images"))
+
+ALLOWED_IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
+
+# 內網白名單:設定 ALLOWED_IPS(逗號分隔)後,只有名單內來源可存取。
+# 未設定 = 功能關閉(內網部署靠網路隔離本身,不需要此機制)。
+ALLOWED_IPS = {ip.strip() for ip in os.environ.get("ALLOWED_IPS", "").split(",") if ip.strip()}
+
+
+@app.before_request
+def restrict_to_allowed_ips():
+    # 來源 IP 取 X-Forwarded-For 第一值(Render 等反向代理會正確設定);
+    # 直連部署時此標頭可被偽造,故本機制僅設計給「雲端 + 公司固定 IP」情境。
+    if not ALLOWED_IPS:
+        return None
+    xff = request.headers.get("X-Forwarded-For", "")
+    client_ip = xff.split(",")[0].strip() if xff else (request.remote_addr or "")
+    if client_ip not in ALLOWED_IPS:
+        return Response(
+            "<h1>403 禁止存取</h1><p>此系統僅限公司內部網路使用。</p>",
+            status=403, mimetype="text/html")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +118,49 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_tx_product ON transactions(product_id);
         CREATE INDEX IF NOT EXISTS idx_tx_created ON transactions(created_at);
+        CREATE TABLE IF NOT EXISTS part_aliases (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            company    TEXT NOT NULL,
+            alias_sku  TEXT NOT NULL,
+            note       TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(company, alias_sku)
+        );
+        CREATE INDEX IF NOT EXISTS idx_alias_sku ON part_aliases(alias_sku);
+        CREATE INDEX IF NOT EXISTS idx_alias_product ON part_aliases(product_id);
+        CREATE TABLE IF NOT EXISTS product_images (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id    INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            filename      TEXT NOT NULL,
+            original_name TEXT DEFAULT '',
+            phash         TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_img_product ON product_images(product_id);
     """)
     conn.commit()
     conn.close()
+    os.makedirs(IMAGE_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 以圖搜圖:dHash 感知雜湊(9x8 灰階縮圖 → 64-bit 指紋)+ Hamming 距離
+# ---------------------------------------------------------------------------
+
+def compute_dhash(stream):
+    # 回傳 16 位 hex 字串;讀不出圖片時丟出例外由呼叫端處理
+    img = Image.open(stream).convert("L").resize((9, 8), Image.LANCZOS)
+    px = list(img.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (1 if px[row * 9 + col] > px[row * 9 + col + 1] else 0)
+    return f"{bits:016x}"
+
+
+def hamming_distance(h1, h2):
+    return bin(int(h1, 16) ^ int(h2, 16)).count("1")
 
 
 def now_str():
@@ -151,6 +224,12 @@ LAYOUT = """
         .filters input[type=submit] { margin-top: 0; }
         footer { text-align: center; color: #999; padding: 14px; font-size: 12px; }
         a.plain { color: #2980b9; }
+        .alias-cell { font-size: 12px; color: #555; }
+        .photo-wall { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+        .photo-wall .photo-item { text-align: center; }
+        .photo-wall img, img.thumb { max-width: 140px; max-height: 140px; border: 1px solid #ddd; border-radius: 4px; }
+        .detail-section { margin-top: 24px; border-top: 1px solid #eee; padding-top: 12px; }
+        .import-help { background: #f4f6f7; border: 1px solid #d5dbdb; padding: 10px 14px; border-radius: 4px; font-size: 13px; }
     </style>
 </head>
 <body>
@@ -164,6 +243,8 @@ LAYOUT = """
         <a href="{{ url_for('suppliers') }}">供應商</a>
         <a href="{{ url_for('report') }}">報表</a>
         <a href="{{ url_for('product_new') }}">新增商品</a>
+        <a href="{{ url_for('image_search') }}">以圖搜圖</a>
+        <a href="{{ url_for('csv_import') }}">CSV 匯入</a>
         <span class="user-info">使用者:{{ session.get('username') }}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
     </nav>
     {% endif %}
@@ -226,11 +307,12 @@ PAGE_INDEX = """
 </form>
 {% if products %}
 <table>
-    <tr><th>SKU</th><th>名稱</th><th>分類</th><th>庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th><th>操作</th></tr>
+    <tr><th>SKU</th><th>名稱</th><th>別名料號</th><th>分類</th><th>庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th><th>操作</th></tr>
     {% for p in products %}
     <tr{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} class="low-stock"{% endif %}>
         <td>{{ p['sku'] }}</td>
-        <td>{{ p['name'] }}{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
+        <td><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a>{% if p['low_stock_threshold'] > 0 and p['quantity'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
+        <td class="alias-cell">{{ p['alias_text'] or '—' }}</td>
         <td>{{ p['category'] }}</td>
         <td id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
         <td>{{ p['unit'] }}</td>
@@ -238,6 +320,7 @@ PAGE_INDEX = """
         <td>{{ p['low_stock_threshold'] }}</td>
         <td>{{ p['supplier_name'] or '—' }}</td>
         <td>
+            <a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">詳細</a>
             <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯</a>
             <form class="inline" method="post" action="{{ url_for('product_delete', pid=p['id']) }}"
                   onsubmit="return confirm('確定刪除商品「{{ p['name'] }}」?');">
@@ -430,6 +513,166 @@ PAGE_REPORT = """
 <p>庫存總價值:<strong id="report-total-value">{{ total_value_str }}</strong></p>
 """
 
+PAGE_PRODUCT_DETAIL = """
+<h1>商品詳細:{{ p['name'] }}</h1>
+<table>
+    <tr><th>SKU</th><th>分類</th><th>目前庫存</th><th>單位</th><th>單價</th><th>低庫存門檻</th><th>供應商</th></tr>
+    <tr>
+        <td>{{ p['sku'] }}</td>
+        <td>{{ p['category'] }}</td>
+        <td id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+        <td>{{ p['unit'] }}</td>
+        <td>{{ p['unit_price_str'] }}</td>
+        <td>{{ p['low_stock_threshold'] }}</td>
+        <td>{{ p['supplier_name'] or '—' }}</td>
+    </tr>
+</table>
+<p>
+    <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯基本資料</a> |
+    <a class="plain" href="{{ url_for('stock_in', product_id=p['id']) }}">入庫</a> |
+    <a class="plain" href="{{ url_for('stock_out', product_id=p['id']) }}">出庫</a> |
+    <a class="plain" href="{{ url_for('history', product_id=p['id']) }}">完整異動歷史</a>
+</p>
+
+<div class="detail-section">
+    <h2>照片</h2>
+    {% if images %}
+    <div class="photo-wall">
+        {% for img in images %}
+        <div class="photo-item">
+            <img src="{{ url_for('serve_image', filename=img['filename']) }}" alt="{{ p['name'] }}">
+            <form class="inline" method="post" action="{{ url_for('image_delete', pid=p['id'], img_id=img['id']) }}"
+                  onsubmit="return confirm('確定刪除這張照片?');">
+                <button class="small-btn" type="submit">刪除</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p>尚未上傳照片。</p>
+    {% endif %}
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('image_upload', pid=p['id']) }}">
+        <input type="file" name="photo" accept="image/*">
+        <input type="submit" value="上傳照片">
+    </form>
+</div>
+
+<div class="detail-section">
+    <h2>跨公司料號對照</h2>
+    {% if aliases %}
+    <table>
+        <tr><th>公司</th><th>該公司料號</th><th>備註</th><th>操作</th></tr>
+        {% for a in aliases %}
+        <tr>
+            <td>{{ a['company'] }}</td>
+            <td>{{ a['alias_sku'] }}</td>
+            <td>{{ a['note'] }}</td>
+            <td>
+                <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}">
+                    <button class="small-btn" type="submit">刪除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>尚無別名料號。不同公司對同一物料的料號都可以登記在這裡,搜尋時任一料號都找得到。</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('alias_add', pid=p['id']) }}">
+        <label>公司名稱</label><input type="text" name="company">
+        <label>該公司料號</label><input type="text" name="alias_sku">
+        <label>備註</label><input type="text" name="note">
+        <input type="submit" value="新增別名">
+    </form>
+</div>
+
+<div class="detail-section">
+    <h2>近期異動</h2>
+    {% if recent_tx %}
+    <table>
+        <tr><th>時間(UTC)</th><th>類型</th><th>數量</th><th>備註</th><th>操作人員</th></tr>
+        {% for r in recent_tx %}
+        <tr>
+            <td>{{ r['created_at'] }}</td>
+            <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
+            <td>{{ r['quantity'] }}</td>
+            <td>{{ r['note'] }}</td>
+            <td>{{ r['username'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>尚無異動紀錄。</p>
+    {% endif %}
+</div>
+"""
+
+PAGE_IMAGE_SEARCH = """
+<h1>以圖搜圖</h1>
+<p>上傳一張物料照片,系統會比對庫內所有照片,列出外觀最相似的料號。</p>
+{% if not has_pil %}
+<div class="msg error">此功能需要安裝 Pillow 套件(pip install Pillow)後重新啟動系統。</div>
+{% else %}
+<form method="post" enctype="multipart/form-data">
+    <input type="file" name="photo" accept="image/*">
+    <input type="submit" value="搜尋相似物料">
+</form>
+{% endif %}
+{% if results is not none %}
+<div class="detail-section">
+    <h2>搜尋結果(相似度由高至低)</h2>
+    {% if results %}
+    <table>
+        <tr><th>照片</th><th>SKU</th><th>名稱</th><th>相似度</th><th>目前庫存</th></tr>
+        {% for r in results %}
+        <tr>
+            <td><img class="thumb" src="{{ url_for('serve_image', filename=r['filename']) }}" alt=""></td>
+            <td>{{ r['sku'] }}</td>
+            <td><a class="plain" href="{{ url_for('product_detail', pid=r['product_id']) }}">{{ r['name'] }}</a></td>
+            <td>{{ r['similarity'] }}%</td>
+            <td>{{ r['quantity'] }} {{ r['unit'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>庫內尚無照片可比對,請先到商品詳細頁上傳物料照片。</p>
+    {% endif %}
+</div>
+{% endif %}
+"""
+
+PAGE_IMPORT = """
+<h1>CSV 大量匯入</h1>
+<div class="import-help">
+    <p><strong>商品匯入</strong>欄位順序(第一列為標題列,會被略過):<br>
+    <code>SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存</code><br>
+    SKU 與名稱必填,其餘可留空;供應商不存在時自動建立;初始庫存會寫成一筆入庫異動(備註「CSV匯入」)。</p>
+    <p><strong>別名匯入</strong>欄位順序:<br>
+    <code>我方SKU,公司,別名料號,備註</code></p>
+    <p>檔案編碼支援 UTF-8 與 Big5(台灣 Excel 另存 CSV 的預設編碼),系統自動判斷。</p>
+</div>
+<form method="post" enctype="multipart/form-data">
+    <label>匯入類型</label>
+    <select name="mode">
+        <option value="products">商品匯入</option>
+        <option value="aliases">別名匯入</option>
+    </select>
+    <label>CSV 檔案</label><input type="file" name="csv_file" accept=".csv,text/csv">
+    <input type="submit" value="開始匯入">
+</form>
+{% if report_rows is not none %}
+<div class="detail-section">
+    <h2>匯入結果:成功匯入 {{ ok_count }} 筆,跳過 {{ skip_count }} 筆</h2>
+    <table>
+        <tr><th>行號</th><th>內容</th><th>結果</th></tr>
+        {% for r in report_rows %}
+        <tr><td>{{ r['line'] }}</td><td>{{ r['label'] }}</td><td>{{ r['status'] }}</td></tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+"""
+
 
 # ---------------------------------------------------------------------------
 # 帳號:註冊 / 登入 / 登出
@@ -493,15 +736,20 @@ def logout():
 # ---------------------------------------------------------------------------
 
 def query_products(q="", category=""):
+    # 搜尋同時比對我方 SKU、名稱與各公司別名料號(跨公司料號整合的核心)
     sql = """
-        SELECT p.*, s.name AS supplier_name
+        SELECT p.*, s.name AS supplier_name,
+               (SELECT GROUP_CONCAT(a.company || ':' || a.alias_sku, ' / ')
+                FROM part_aliases a WHERE a.product_id = p.id) AS alias_text
         FROM products p LEFT JOIN suppliers s ON p.supplier_id = s.id
         WHERE 1=1
     """
     params = []
     if q:
-        sql += " AND (p.name LIKE ? OR p.sku LIKE ?)"
-        params += [f"%{q}%", f"%{q}%"]
+        sql += """ AND (p.name LIKE ? OR p.sku LIKE ? OR EXISTS (
+                     SELECT 1 FROM part_aliases a WHERE a.product_id = p.id
+                       AND (a.alias_sku LIKE ? OR a.company LIKE ?)))"""
+        params += [f"%{q}%"] * 4
     if category:
         sql += " AND p.category = ?"
         params.append(category)
@@ -658,6 +906,122 @@ def product_delete(pid):
 
 
 # ---------------------------------------------------------------------------
+# 商品詳細頁:照片、跨公司料號別名、近期異動
+# ---------------------------------------------------------------------------
+
+def render_product_detail(pid, error=None, msg=None):
+    db = get_db()
+    row = db.execute("""
+        SELECT p.*, s.name AS supplier_name
+        FROM products p LEFT JOIN suppliers s ON p.supplier_id = s.id
+        WHERE p.id = ?
+    """, (pid,)).fetchone()
+    if row is None:
+        return render_index(error="找不到指定的商品")
+    p = dict(row)
+    p["unit_price_str"] = fmt_num(p["unit_price"])
+    images = db.execute(
+        "SELECT * FROM product_images WHERE product_id = ? ORDER BY id", (pid,)).fetchall()
+    aliases = db.execute(
+        "SELECT * FROM part_aliases WHERE product_id = ? ORDER BY company, alias_sku", (pid,)).fetchall()
+    recent_tx = db.execute("""
+        SELECT t.*, u.username FROM transactions t JOIN users u ON t.user_id = u.id
+        WHERE t.product_id = ? ORDER BY t.id DESC LIMIT 10
+    """, (pid,)).fetchall()
+    return render_page(PAGE_PRODUCT_DETAIL, p=p, images=images, aliases=aliases,
+                       recent_tx=recent_tx, error=error, msg=msg)
+
+
+@app.route("/products/<int:pid>")
+@login_required
+def product_detail(pid):
+    return render_product_detail(pid)
+
+
+@app.route("/products/<int:pid>/images", methods=["POST"])
+@login_required
+def image_upload(pid):
+    db = get_db()
+    if db.execute("SELECT 1 FROM products WHERE id = ?", (pid,)).fetchone() is None:
+        return render_index(error="找不到指定的商品")
+    file = request.files.get("photo")
+    if not file or not file.filename:
+        return render_product_detail(pid, error="請先選擇要上傳的照片檔案")
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_IMAGE_EXTS:
+        return render_product_detail(
+            pid, error="不支援的檔案格式,僅接受 jpg / jpeg / png / gif / webp / bmp")
+    data = file.read()
+    phash = ""
+    if HAS_PIL:
+        try:
+            phash = compute_dhash(io.BytesIO(data))
+        except Exception:
+            return render_product_detail(pid, error="無法讀取圖片內容,請確認檔案未損壞")
+    fname = f"img_{pid}_{secrets.token_hex(8)}.{ext}"
+    with open(os.path.join(IMAGE_DIR, fname), "wb") as f:
+        f.write(data)
+    db.execute("""
+        INSERT INTO product_images (product_id, filename, original_name, phash, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (pid, fname, file.filename, phash, now_str()))
+    db.commit()
+    return redirect(url_for("product_detail", pid=pid))
+
+
+@app.route("/products/<int:pid>/images/<int:img_id>/delete", methods=["POST"])
+@login_required
+def image_delete(pid, img_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM product_images WHERE id = ? AND product_id = ?", (img_id, pid)).fetchone()
+    if row is not None:
+        path = os.path.join(IMAGE_DIR, row["filename"])
+        if os.path.exists(path):
+            os.remove(path)
+        db.execute("DELETE FROM product_images WHERE id = ?", (img_id,))
+        db.commit()
+    return redirect(url_for("product_detail", pid=pid))
+
+
+@app.route("/images/<path:filename>")
+@login_required
+def serve_image(filename):
+    return send_from_directory(IMAGE_DIR, filename)
+
+
+@app.route("/products/<int:pid>/aliases", methods=["POST"])
+@login_required
+def alias_add(pid):
+    db = get_db()
+    if db.execute("SELECT 1 FROM products WHERE id = ?", (pid,)).fetchone() is None:
+        return render_index(error="找不到指定的商品")
+    company = request.form.get("company", "").strip()
+    alias_sku = request.form.get("alias_sku", "").strip()
+    note = request.form.get("note", "").strip()
+    if not company or not alias_sku:
+        return render_product_detail(pid, error="公司名稱與該公司料號不可為空")
+    try:
+        db.execute("""
+            INSERT INTO part_aliases (product_id, company, alias_sku, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (pid, company, alias_sku, note, now_str()))
+        db.commit()
+    except sqlite3.IntegrityError:
+        return render_product_detail(pid, error="此公司+料號組合已存在,同一組別名不可重複登記")
+    return redirect(url_for("product_detail", pid=pid))
+
+
+@app.route("/products/<int:pid>/aliases/<int:aid>/delete", methods=["POST"])
+@login_required
+def alias_delete(pid, aid):
+    db = get_db()
+    db.execute("DELETE FROM part_aliases WHERE id = ? AND product_id = ?", (aid, pid))
+    db.commit()
+    return redirect(url_for("product_detail", pid=pid))
+
+
+# ---------------------------------------------------------------------------
 # 入庫 / 出庫
 # ---------------------------------------------------------------------------
 
@@ -683,10 +1047,23 @@ def parse_stock_form():
 EMPTY_STOCK_FORM = {"product_id": "", "quantity": "", "note": ""}
 
 
+def stock_done_msg(action):
+    # 連續登記:成功後 302 回登記頁,從 done/qty 參數組出成功訊息(含最新庫存)
+    done, qty = request.args.get("done", ""), request.args.get("qty", "")
+    if not done.isdigit() or not qty.isdigit():
+        return None
+    row = get_db().execute(
+        "SELECT name, quantity, unit FROM products WHERE id = ?", (int(done),)).fetchone()
+    if row is None:
+        return None
+    return f"{action}成功:{row['name']} ×{qty},目前庫存 {row['quantity']} {row['unit']},可繼續登記下一筆"
+
+
 @app.route("/stock/in", methods=["GET", "POST"])
 @login_required
 def stock_in():
     f = dict(EMPTY_STOCK_FORM)
+    f["product_id"] = request.args.get("product_id", "")  # 詳細頁連過來時預選商品
     error = None
     if request.method == "POST":
         f, error = parse_stock_form()
@@ -705,15 +1082,17 @@ def stock_in():
                     VALUES (?, ?, 'in', ?, ?, ?)
                 """, (pid, session["user_id"], qty, f["note"], now_str()))
                 db.commit()
-                return redirect(url_for("index"))
+                return redirect(url_for("stock_in", done=pid, qty=qty))
     return render_page(PAGE_STOCK_FORM, title="入庫登記", f=f,
-                       product_list=product_dropdown(), error=error)
+                       product_list=product_dropdown(), error=error,
+                       msg=stock_done_msg("入庫"))
 
 
 @app.route("/stock/out", methods=["GET", "POST"])
 @login_required
 def stock_out():
     f = dict(EMPTY_STOCK_FORM)
+    f["product_id"] = request.args.get("product_id", "")
     error = None
     if request.method == "POST":
         f, error = parse_stock_form()
@@ -738,9 +1117,10 @@ def stock_out():
                         VALUES (?, ?, 'out', ?, ?, ?)
                     """, (pid, session["user_id"], qty, f["note"], now_str()))
                     db.commit()
-                    return redirect(url_for("index"))
+                    return redirect(url_for("stock_out", done=pid, qty=qty))
     return render_page(PAGE_STOCK_FORM, title="出庫登記", f=f,
-                       product_list=product_dropdown(), error=error)
+                       product_list=product_dropdown(), error=error,
+                       msg=stock_done_msg("出庫"))
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +1287,176 @@ def report():
         total_qty=sum(r["quantity"] for r in rows),
         total_value_str=fmt_num(sum(r["value"] for r in rows)),
     )
+
+
+# ---------------------------------------------------------------------------
+# 以圖搜圖:上傳照片 → dHash 比對庫內所有照片 → 相似度排名
+# ---------------------------------------------------------------------------
+
+@app.route("/search/image", methods=["GET", "POST"])
+@login_required
+def image_search():
+    results = None
+    error = None
+    if request.method == "POST":
+        if not HAS_PIL:
+            error = "此功能需要安裝 Pillow 套件"
+        else:
+            file = request.files.get("photo")
+            if not file or not file.filename:
+                error = "請先選擇要搜尋的照片"
+            else:
+                try:
+                    query_hash = compute_dhash(io.BytesIO(file.read()))
+                except Exception:
+                    error = "無法讀取圖片內容,請確認檔案為有效的圖片"
+                    query_hash = None
+                if query_hash:
+                    rows = get_db().execute("""
+                        SELECT i.id, i.filename, i.phash, i.product_id,
+                               p.sku, p.name, p.quantity, p.unit
+                        FROM product_images i JOIN products p ON i.product_id = p.id
+                        WHERE i.phash != ''
+                    """).fetchall()
+                    scored = []
+                    for r in rows:
+                        dist = hamming_distance(query_hash, r["phash"])
+                        scored.append({**dict(r), "distance": dist,
+                                       "similarity": round((64 - dist) / 64 * 100)})
+                    scored.sort(key=lambda x: x["distance"])
+                    # 同一商品多張照片只留最相似的一張,列出前 10 名
+                    seen, results = set(), []
+                    for s in scored:
+                        if s["product_id"] in seen:
+                            continue
+                        seen.add(s["product_id"])
+                        results.append(s)
+                        if len(results) >= 10:
+                            break
+    return render_page(PAGE_IMAGE_SEARCH, results=results, has_pil=HAS_PIL, error=error)
+
+
+# ---------------------------------------------------------------------------
+# CSV 大量匯入(商品 / 別名),支援 UTF-8 與 Big5(cp950)
+# ---------------------------------------------------------------------------
+
+def decode_csv_bytes(raw):
+    # 台灣 Excel 另存 CSV 預設 cp950;先試 utf-8-sig(含 BOM 也能吃)再試 cp950
+    for enc in ("utf-8-sig", "cp950"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def import_products_rows(rows):
+    # 欄位:SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存(第一列為標題)
+    db = get_db()
+    report = []
+    ok = 0
+    for line_no, row in rows:
+        row = list(row) + [""] * (8 - len(row))
+        sku, name, category, unit, price_s, threshold_s, supplier_name, init_qty_s = \
+            [c.strip() for c in row[:8]]
+        label = f"{sku} {name}".strip()
+        if not sku or not name:
+            report.append({"line": line_no, "label": label or "(空列)", "status": "跳過:SKU 與名稱必填"})
+            continue
+        if db.execute("SELECT 1 FROM products WHERE sku = ?", (sku,)).fetchone():
+            report.append({"line": line_no, "label": label, "status": "跳過:SKU 已存在"})
+            continue
+        try:
+            price = float(price_s) if price_s else 0.0
+            threshold = int(threshold_s) if threshold_s else 0
+            init_qty = int(init_qty_s) if init_qty_s else 0
+            if price < 0 or threshold < 0 or init_qty < 0:
+                raise ValueError
+        except ValueError:
+            report.append({"line": line_no, "label": label, "status": "跳過:數字欄位格式錯誤"})
+            continue
+        supplier_id = None
+        if supplier_name:
+            srow = db.execute("SELECT id FROM suppliers WHERE name = ?", (supplier_name,)).fetchone()
+            if srow:
+                supplier_id = srow["id"]
+            else:  # 供應商不存在時自動建立,方便整批倒資料
+                cur = db.execute(
+                    "INSERT INTO suppliers (name, created_at) VALUES (?, ?)",
+                    (supplier_name, now_str()))
+                supplier_id = cur.lastrowid
+        cur = db.execute("""
+            INSERT INTO products (name, sku, category, unit, unit_price,
+                                  low_stock_threshold, quantity, supplier_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, sku, category, unit or "個", price, threshold, init_qty,
+              supplier_id, now_str()))
+        if init_qty > 0:  # 初始庫存寫成入庫異動,維持歷史一致
+            db.execute("""
+                INSERT INTO transactions (product_id, user_id, type, quantity, note, created_at)
+                VALUES (?, ?, 'in', ?, 'CSV匯入', ?)
+            """, (cur.lastrowid, session["user_id"], init_qty, now_str()))
+        ok += 1
+        report.append({"line": line_no, "label": label, "status": "成功"})
+    db.commit()
+    return ok, report
+
+
+def import_aliases_rows(rows):
+    # 欄位:我方SKU,公司,別名料號,備註(第一列為標題)
+    db = get_db()
+    report = []
+    ok = 0
+    for line_no, row in rows:
+        row = list(row) + [""] * (4 - len(row))
+        sku, company, alias_sku, note = [c.strip() for c in row[:4]]
+        label = f"{sku} → {company}:{alias_sku}"
+        if not sku or not company or not alias_sku:
+            report.append({"line": line_no, "label": label, "status": "跳過:我方SKU、公司、別名料號必填"})
+            continue
+        prow = db.execute("SELECT id FROM products WHERE sku = ?", (sku,)).fetchone()
+        if prow is None:
+            report.append({"line": line_no, "label": label, "status": "跳過:找不到我方SKU"})
+            continue
+        try:
+            db.execute("""
+                INSERT INTO part_aliases (product_id, company, alias_sku, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (prow["id"], company, alias_sku, note, now_str()))
+            ok += 1
+            report.append({"line": line_no, "label": label, "status": "成功"})
+        except sqlite3.IntegrityError:
+            report.append({"line": line_no, "label": label, "status": "跳過:此公司+料號組合已存在"})
+    db.commit()
+    return ok, report
+
+
+@app.route("/import", methods=["GET", "POST"])
+@login_required
+def csv_import():
+    report_rows = None
+    ok_count = skip_count = 0
+    error = None
+    if request.method == "POST":
+        mode = request.form.get("mode", "products")
+        file = request.files.get("csv_file")
+        if not file or not file.filename:
+            error = "請先選擇 CSV 檔案"
+        else:
+            text = decode_csv_bytes(file.read())
+            if text is None:
+                error = "無法辨識檔案編碼,請使用 UTF-8 或 Big5(cp950)編碼的 CSV"
+            else:
+                all_rows = list(csv.reader(io.StringIO(text)))
+                data_rows = [(i + 1, r) for i, r in enumerate(all_rows)][1:]  # 略過標題列
+                if mode == "aliases":
+                    ok_count, report_rows = import_aliases_rows(data_rows)
+                else:
+                    ok_count, report_rows = import_products_rows(data_rows)
+                skip_count = len(report_rows) - ok_count
+    return render_page(PAGE_IMPORT, report_rows=report_rows, ok_count=ok_count,
+                       skip_count=skip_count, error=error,
+                       msg=f"成功匯入 {ok_count} 筆,跳過 {skip_count} 筆" if report_rows is not None and not error else None)
 
 
 # ---------------------------------------------------------------------------
