@@ -14,33 +14,171 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # 頁面模板（直接內嵌 HTML）
 HTML_PAGE = """
 <!doctype html>
-<html>
+<html lang="zh-Hant">
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Patrick Method Solver</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        textarea { width: 100%; height: 100px; margin-bottom: 10px; }
-        input[type=submit] { padding: 10px 20px; }
-        .result { margin-top: 20px; white-space: pre-line; background: #f0f0f0; padding: 10px; }
+        :root {
+            --bg: #eef1f7;
+            --card: #ffffff;
+            --ink: #1f2437;
+            --muted: #5b6478;
+            --accent: #3f51b5;
+            --accent-dark: #32408f;
+            --accent-soft: #e8ebfa;
+            --line: #d9dee9;
+            --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 32px 16px;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: "Segoe UI", "Microsoft JhengHei", "PingFang TC",
+                         "Noto Sans TC", "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+        }
+        .wrap { max-width: 720px; margin: 0 auto; }
+        header.hero { margin-bottom: 20px; }
+        header.hero h1 {
+            margin: 0 0 4px;
+            font-size: 1.55rem;
+            letter-spacing: .02em;
+        }
+        header.hero p { margin: 0; color: var(--muted); font-size: .95rem; }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 24px;
+            box-shadow: 0 2px 10px rgba(31, 36, 55, .06);
+        }
+        label { display: block; font-weight: 600; margin-bottom: 6px; }
+        .hint { color: var(--muted); font-weight: 400; font-size: .85rem; }
+        textarea {
+            width: 100%;
+            height: 88px;
+            margin-bottom: 18px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: #fbfcfe;
+            color: var(--ink);
+            font-family: var(--mono);
+            font-size: .95rem;
+            resize: vertical;
+        }
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .upload {
+            border: 1px dashed var(--line);
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 20px;
+            background: #fbfcfe;
+        }
+        .upload label { margin-bottom: 8px; }
+        input[type=file] { font-size: .9rem; color: var(--muted); max-width: 100%; }
+        input[type=file]::file-selector-button {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 6px 14px;
+            margin-right: 10px;
+            background: var(--accent-soft);
+            color: var(--accent-dark);
+            font-weight: 600;
+            cursor: pointer;
+            transition: background .15s ease;
+        }
+        input[type=file]::file-selector-button:hover { background: #d8ddf5; }
+        .sep {
+            display: inline-block;
+            min-width: 1.3em;
+            padding: 0 4px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #f2f4fa;
+            color: var(--accent-dark);
+            font-family: var(--mono);
+            font-size: .85em;
+            text-align: center;
+            line-height: 1.4;
+        }
+        input[type=submit] {
+            display: block;
+            width: 100%;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 10px;
+            background: var(--accent);
+            color: #fff;
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: .05em;
+            cursor: pointer;
+            transition: background .15s ease;
+        }
+        input[type=submit]:hover { background: var(--accent-dark); }
+        .result {
+            margin-top: 20px;
+            padding: 18px 20px;
+            background: var(--accent-soft);
+            border: 1px solid #c9d1f2;
+            border-left: 5px solid var(--accent);
+            border-radius: 10px;
+        }
+        .result strong { display: block; margin-bottom: 6px; }
+        .result .sop {
+            white-space: pre-line;
+            font-family: var(--mono);
+            font-size: .95rem;
+        }
+        footer {
+            margin-top: 28px;
+            text-align: center;
+            color: var(--muted);
+            font-size: .8rem;
+        }
+        @media (max-width: 480px) {
+            body { padding: 16px 10px; }
+            .card { padding: 16px; }
+            header.hero h1 { font-size: 1.3rem; }
+        }
     </style>
 </head>
 <body>
-    <h1>Patrick Method 最小 SOP 化簡工具</h1>
-    <form method="post" enctype="multipart/form-data">
-        <label>PI 輸入（多輸出以 ; 分隔）：</label><br>
-        <textarea name="pi_input">A'B, AB; A'C</textarea><br>
-        <label>Minterm 輸入（多輸出以 ; 分隔）：</label><br>
-        <textarea name="minterms">1,3; 2,6</textarea><br>
-        <label>或上傳含 PI 與 Minterms 的文字檔 (.txt)：</label><br>
-        <input type="file" name="input_file"><br><br>
-        <input type="submit" value="計算最小 SOP">
-    </form>
-    {% if result %}
-    <div class="result">
-        <strong>計算結果：</strong><br>{{ result }}
+    <div class="wrap">
+        <header class="hero">
+            <h1>Patrick Method 最小 SOP 化簡工具</h1>
+            <p>輸入 Prime Implicants 與 Minterms，求出涵蓋所有 minterm 的最小 SOP 組合</p>
+        </header>
+        <div class="card">
+            <form method="post" enctype="multipart/form-data">
+                <label>PI 輸入 <span class="hint">（多輸出以 <span class="sep">;</span> 分隔，同一輸出內以 <span class="sep">,</span> 分隔）</span></label>
+                <textarea name="pi_input">A'B, AB; A'C</textarea>
+                <label>Minterm 輸入 <span class="hint">（多輸出以 <span class="sep">;</span> 分隔）</span></label>
+                <textarea name="minterms">1,3; 2,6</textarea>
+                <div class="upload">
+                    <label>或上傳文字檔 (.txt) <span class="hint">第 1 行 PI、第 2 行 Minterms，會覆蓋上方輸入</span></label>
+                    <input type="file" name="input_file">
+                </div>
+                <input type="submit" value="計算最小 SOP">
+            </form>
+            {% if result %}
+            <div class="result">
+                <strong>計算結果：</strong>
+                <div class="sop">{{ result }}</div>
+            </div>
+            {% endif %}
+        </div>
+        <footer>&copy; {{ year }} Patrick Solver</footer>
     </div>
-    {% endif %}
-    <footer><hr><small>&copy; {{ year }} Patrick Solver</small></footer>
 </body>
 </html>
 """
