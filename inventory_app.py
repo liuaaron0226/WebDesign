@@ -36,6 +36,13 @@ try:
 except ImportError:
     HAS_QRCODE = False
 
+# openpyxl 供 Excel(.xlsx)匯入使用;缺席時 CSV 匯入照常運作
+try:
+    from openpyxl import load_workbook
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
 app = Flask(__name__)
 
 # 資料庫路徑可用環境變數覆蓋,驗收測試用 /tmp 下的乾淨 DB
@@ -279,6 +286,39 @@ def init_db():
             UNIQUE(count_id, product_id)
         );
         CREATE INDEX IF NOT EXISTS idx_sci_count ON stock_count_items(count_id);
+        -- 收貨單(ASN,預先到貨通知):供應商檔案先進系統成為待核對單據,
+        -- 放行前完全不動庫存;放行時才產生 in 異動與批次
+        CREATE TABLE IF NOT EXISTS receipts (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            ref_no        TEXT DEFAULT '',
+            supplier_id   INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+            supplier_name TEXT DEFAULT '',
+            source        TEXT DEFAULT '',
+            status        TEXT NOT NULL DEFAULT 'open'
+                          CHECK (status IN ('open','posted','cancelled')),
+            note          TEXT DEFAULT '',
+            username      TEXT DEFAULT '',
+            created_at    TEXT NOT NULL,
+            posted_at     TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS receipt_items (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id   INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+            line_no      INTEGER NOT NULL DEFAULT 0,
+            raw_sku      TEXT DEFAULT '',
+            raw_name     TEXT DEFAULT '',
+            product_id   INTEGER REFERENCES products(id) ON DELETE SET NULL,
+            match_type   TEXT DEFAULT 'none',
+            match_note   TEXT DEFAULT '',
+            expected_qty INTEGER NOT NULL DEFAULT 0,
+            received_qty INTEGER,
+            lot_no       TEXT DEFAULT '',
+            expiry_date  TEXT DEFAULT '',
+            unit_cost    REAL,
+            note         TEXT DEFAULT '',
+            checked_at   TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_ritems_receipt ON receipt_items(receipt_id);
     """)
     # 既有資料庫的欄位擴充(SQLite 的 ADD COLUMN 重複執行會報錯,故先檢查)
     ensure_column(conn, "products", "location", "TEXT DEFAULT ''")
@@ -701,6 +741,11 @@ LAYOUT = """
                      padding: 2px 9px; border-radius: 999px; }
         .chip-posted { background: #dcfce7; color: #15803d; font-size: 12px; font-weight: 700;
                        padding: 2px 9px; border-radius: 999px; }
+        .chip-void { background: #e2e8f0; color: #475569; font-size: 12px; font-weight: 700;
+                     padding: 2px 9px; border-radius: 999px; }
+        label.chk { display: inline-flex; align-items: center; gap: 4px; margin-top: 0;
+                    font-size: 12px; font-weight: 600; color: var(--mute); white-space: nowrap; }
+        label.chk input { width: auto; margin: 0; }
         tr.has-diff td { background: #fffbeb; }
         @media (prefers-color-scheme: dark) {
             .loc-cell { color: #cbd5e1; }
@@ -843,9 +888,16 @@ LAYOUT = """
             .filters input[type=submit], .hero-search input[type=submit] { min-height: auto; }
             /* 直式表單的主要送出鈕滿版好按(篩選列與搜尋列除外) */
             form:not(.filters):not(.hero-search):not(.inline) > input[type=submit] { width: 100%; }
-            /* 盤點輸入:手機上整列堆疊,輸入框與按鈕都放大好按 */
-            table.cards td[data-label="實盤數"] { flex-direction: column; align-items: stretch; }
-            table.cards td[data-label="實盤數"]::before { margin-bottom: 6px; }
+            /* 盤點與收貨的現場輸入:手機上整列堆疊,輸入框與按鈕都放大好按 */
+            table.cards td[data-label="實盤數"],
+            table.cards td[data-label="實收數"],
+            table.cards td[data-label="對應商品"] { flex-direction: column; align-items: stretch;
+                                                     justify-content: flex-start; gap: 4px; }
+            table.cards td[data-label="實盤數"]::before,
+            table.cards td[data-label="實收數"]::before,
+            table.cards td[data-label="對應商品"]::before { margin-bottom: 6px; }
+            table.cards td[data-label="對應商品"] { text-align: left; }
+            table.cards td[data-label="對應商品"] .count-note { width: 100% !important; }
             .count-form { width: 100%; }
             .count-input, .count-note { width: 100% !important; flex: 1 1 100%; }
             .count-form .small-btn { width: 100%; margin-top: 4px; }
@@ -858,9 +910,10 @@ LAYOUT = """
         <a class="brand" href="{{ url_for('index') }}"><span class="brand-mark"></span>庫存管理</a>
         <a class="top{% if request.path == '/' %} active{% endif %}" href="{{ url_for('index') }}">庫存總覽</a>
         {% set navp = request.path %}
-        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/alerts') or navp.startswith('/counts') or navp.startswith('/reservations') %} here{% endif %}">
+        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/alerts') or navp.startswith('/counts') or navp.startswith('/reservations') or navp.startswith('/receipts') %} here{% endif %}">
             <summary>庫存作業</summary>
             <div class="menu-panel">
+                <a {% if navp.startswith('/receipts') %}class="active" {% endif %}href="{{ url_for('receipts_page') }}">收貨單</a>
                 <a {% if navp == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫</a>
                 <a {% if navp == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫</a>
                 <a {% if navp.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">盤點</a>
@@ -1639,6 +1692,163 @@ PAGE_COUNT_DETAIL = """
 {% endif %}
 """
 
+PAGE_RECEIPTS = """
+<h1>收貨單(到貨預先登記)</h1>
+<p class="note">
+    業界作法叫 ASN(預先到貨通知):供應商的送貨明細先進系統成為待核對單據,
+    現場只需核對數量、不必重打料號與品名。<strong>放行之前庫存完全不變</strong>,
+    確認無誤按下放行,才產生正式入庫與批次。
+</p>
+
+<div class="detail-section">
+    <h2>上傳到貨明細(Excel / CSV)</h2>
+    <div class="import-help">
+        <p>欄位順序(第一列為標題列,會被略過):<br>
+        <code>料號,品名,數量,批號,效期,單價,備註</code><br>
+        料號可以是<strong>我方料號,也可以是供應商自己的料號</strong>——系統會透過跨公司料號對照自動找到我方商品。
+        對不上的列會標示「未對應」,可在明細頁手動指定,並選擇記住這個對應,下次就自動對上。</p>
+        <p><a class="plain" href="{{ url_for('receipt_template') }}">下載空白範例檔</a>(可直接轉給供應商填)</p>
+    </div>
+    <form method="post" action="{{ url_for('receipt_upload') }}" enctype="multipart/form-data">
+        <label>送貨單號 / 通知單號(選填)</label>
+        <input type="text" name="ref_no" placeholder="例:DN-20260807-01">
+        <label>供應商</label>
+        <select name="supplier_id">
+            <option value="">(未指定)</option>
+            {% for s in suppliers %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}
+        </select>
+        <label>明細檔案</label>
+        <input type="file" name="file" accept=".csv,.xlsx,.xlsm,.tsv,.txt,text/csv">
+        <label>備註(選填)</label><input type="text" name="note">
+        <input type="submit" value="建立收貨單">
+    </form>
+</div>
+
+<div class="detail-section">
+    <h2>收貨單列表</h2>
+    {% if rows %}
+    <table class="cards">
+        <tr><th>單號</th><th>供應商</th><th>建立時間</th><th>建立者</th>
+            <th class="num">品項</th><th class="num">已核對</th><th>狀態</th><th>操作</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td data-label="單號">{{ r['ref_no'] or '(未填單號)' }}</td>
+            <td data-label="供應商">{{ r['supplier_name'] or '—' }}</td>
+            <td data-label="建立時間">{{ r['created_local'] }}</td>
+            <td data-label="建立者">{{ r['username'] }}</td>
+            <td data-label="品項" class="num">{{ r['item_count'] }}</td>
+            <td data-label="已核對" class="num">{{ r['checked_count'] }}</td>
+            <td data-label="狀態">
+                {% if r['status'] == 'posted' %}<span class="chip-posted">已放行</span>
+                {% elif r['status'] == 'cancelled' %}<span class="chip-void">已作廢</span>
+                {% else %}<span class="chip-open">待核對</span>{% endif %}
+            </td>
+            <td data-label="操作"><a class="plain" href="{{ url_for('receipt_detail', rid=r['id']) }}">開啟</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>尚無收貨單。用上方表單上傳供應商的送貨明細建立第一張。</p>
+    {% endif %}
+</div>
+"""
+
+PAGE_RECEIPT_DETAIL = """
+<h1>收貨單:{{ r['ref_no'] or '(未填單號)' }}</h1>
+<p class="note">
+    供應商 {{ r['supplier_name'] or '未指定' }}・來源 {{ r['source'] }}・
+    建立於 {{ r['created_local'] }}({{ r['username'] }})・
+    {% if r['status'] == 'posted' %}<strong>已於 {{ r['posted_local'] }} 放行入庫</strong>
+    {% elif r['status'] == 'cancelled' %}<strong>已作廢</strong>
+    {% else %}狀態:待核對(核對實收數量後按下方「放行」才會入庫){% endif %}
+    {% if r['note'] %}<br>備註:{{ r['note'] }}{% endif %}
+</p>
+
+<div class="stat-row">
+    <div class="stat-box"><div class="stat-num">{{ total }}</div><div class="stat-cap">明細品項</div></div>
+    <div class="stat-box"><div class="stat-num">{{ checked }}</div><div class="stat-cap">已核對</div></div>
+    <div class="stat-box"><div class="stat-num"{% if unmatched %} style="color:#b91c1c"{% endif %}>{{ unmatched }}</div><div class="stat-cap">未對應料號</div></div>
+    <div class="stat-box"><div class="stat-num">{{ total_qty }}</div><div class="stat-cap">預計收料總量</div></div>
+</div>
+
+<table class="cards">
+    <tr><th>行</th><th>檔案料號</th><th>對應商品</th><th class="num">通知量</th>
+        <th class="num">實收數</th><th>批號 / 效期</th><th>備註</th></tr>
+    {% for i in items %}
+    <tr{% if i['product_id'] is none %} class="has-diff"{% endif %}>
+        <td data-label="行">{{ i['line_no'] }}</td>
+        <td data-label="檔案料號">
+            <span class="loc-cell">{{ i['raw_sku'] or '—' }}</span>
+            {% if i['raw_name'] %}<br><span class="alias-cell">{{ i['raw_name'] }}</span>{% endif %}
+        </td>
+        <td data-label="對應商品">
+            {% if i['product_id'] %}
+                <a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['pname'] }}</a>
+                <br><span class="alias-cell">{{ i['psku'] }}・{{ i['match_label'] }}</span>
+            {% elif r['status'] == 'open' %}
+                <span class="badge-low">未對應</span>
+                <form class="inline count-form" method="post"
+                      action="{{ url_for('receipt_item_map', rid=r['id'], item_id=i['id']) }}">
+                    <select name="product_id" class="count-note">
+                        <option value="">選擇我方商品…</option>
+                        {% for p in product_list %}<option value="{{ p['id'] }}">{{ p['sku'] }} / {{ p['name'] }}</option>{% endfor %}
+                    </select>
+                    {% if r['supplier_name'] and i['raw_sku'] %}
+                    <label class="chk"><input type="checkbox" name="remember" value="1" checked>記住此對應</label>
+                    {% endif %}
+                    <button class="small-btn ok-btn" type="submit">指定</button>
+                </form>
+            {% else %}
+                <span class="badge-low">未對應</span>
+            {% endif %}
+        </td>
+        <td data-label="通知量" class="num">{{ i['expected_qty'] }}</td>
+        <td data-label="實收數" class="num">
+            {% if r['status'] != 'open' %}{{ i['received_qty'] if i['received_qty'] is not none else '—' }}
+            {% else %}
+            <form class="inline count-form" method="post"
+                  action="{{ url_for('receipt_item_check', rid=r['id'], item_id=i['id']) }}">
+                <input type="number" name="received_qty" min="0" inputmode="numeric" class="count-input"
+                       value="{{ i['received_qty'] if i['received_qty'] is not none else i['expected_qty'] }}">
+                <input type="text" name="note" class="count-note" placeholder="備註" value="{{ i['note'] }}">
+                <button class="small-btn ok-btn" type="submit">核對</button>
+            </form>
+            {% endif %}
+        </td>
+        <td data-label="批號 / 效期">
+            {{ i['lot_no'] or '(自動編號)' }}{% if i['expiry_date'] %}<br><span class="alias-cell">效期 {{ i['expiry_date'] }}</span>{% endif %}
+        </td>
+        <td data-label="備註">{{ i['note'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+{% if r['status'] == 'open' %}
+<div class="detail-section">
+    <h2>放行入庫</h2>
+    <p class="note">
+        放行會把每一列「已對應且實收 &gt; 0」的品項寫成正式入庫異動並建立批次,庫存這時才會增加。
+        實收填 0 或未核對的列會被略過。<strong>尚有未對應料號且實收 &gt; 0 時無法放行</strong>——
+        有料進來卻沒有帳,是庫存失準最常見的起點。放行後不可再修改。
+    </p>
+    <form method="post" action="{{ url_for('receipt_post', rid=r['id']) }}"
+          onsubmit="return confirm('確定放行?將依實收數量正式入庫,且不可復原。');">
+        <input type="submit" value="放行並入庫">
+    </form>
+</div>
+{% if session.get('is_admin') %}
+<div class="detail-section">
+    <h2>作廢</h2>
+    <p class="note">送錯檔案或整批退回時使用。作廢不會影響庫存(本來就還沒入庫)。</p>
+    <form method="post" action="{{ url_for('receipt_cancel', rid=r['id']) }}"
+          onsubmit="return confirm('確定作廢這張收貨單?');">
+        <button class="small-btn" type="submit">作廢此收貨單</button>
+    </form>
+</div>
+{% endif %}
+{% endif %}
+"""
+
 PAGE_RESERVATIONS = """
 <h1>庫存預留</h1>
 <p class="note">
@@ -1795,14 +2005,19 @@ PAGE_IMAGE_SEARCH = """
 """
 
 PAGE_IMPORT = """
-<h1>CSV 大量匯入</h1>
+<h1>大量匯入(Excel / CSV)</h1>
 <div class="import-help">
     <p><strong>商品匯入</strong>欄位順序(第一列為標題列,會被略過):<br>
     <code>SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存</code><br>
     SKU 與名稱必填,其餘可留空;供應商不存在時自動建立;初始庫存會寫成一筆入庫異動(備註「CSV匯入」)。</p>
     <p><strong>別名匯入</strong>欄位順序:<br>
     <code>我方SKU,公司,別名料號,備註</code></p>
-    <p>檔案編碼支援 UTF-8 與 Big5(台灣 Excel 另存 CSV 的預設編碼),系統自動判斷。</p>
+    <p><strong>支援格式</strong>:Excel(<code>.xlsx</code>)、CSV、Tab 分隔(<code>.tsv</code>/<code>.txt</code>)。
+    CSV 編碼支援 UTF-8 與 Big5(台灣 Excel 另存 CSV 的預設編碼),系統自動判斷。
+    {% if not has_openpyxl %}<br><strong>注意:</strong>此主機未安裝 openpyxl,目前只能讀 CSV;
+    執行 <code>pip install -r requirements.txt</code> 後重新啟動即可支援 Excel。{% endif %}</p>
+    <p class="note">要登記「到貨收料」請改用<a class="plain" href="{{ url_for('receipts_page') }}">收貨單</a>——
+    那裡是先預先登記、核對無誤才放行入庫,不會直接動到庫存。</p>
 </div>
 <form method="post" enctype="multipart/form-data">
     <label>匯入類型</label>
@@ -1810,7 +2025,8 @@ PAGE_IMPORT = """
         <option value="products">商品匯入</option>
         <option value="aliases">別名匯入</option>
     </select>
-    <label>CSV 檔案</label><input type="file" name="csv_file" accept=".csv,text/csv">
+    <label>檔案(Excel 或 CSV)</label>
+    <input type="file" name="csv_file" accept=".csv,.xlsx,.xlsm,.tsv,.txt,text/csv">
     <input type="submit" value="開始匯入">
 </form>
 {% if report_rows is not none %}
@@ -3088,6 +3304,309 @@ def count_post(cid):
 
 
 # ---------------------------------------------------------------------------
+# 收貨單(ASN):供應商檔案 → 預先登記 → 逐項核對 → 放行才入庫
+# ---------------------------------------------------------------------------
+
+RECEIPT_HEADER = ["料號", "品名", "數量", "批號", "效期", "單價", "備註"]
+MATCH_LABELS = {"sku": "我方料號", "alias": "別名對應", "manual": "人工指定", "none": "未對應"}
+
+
+def match_part(db, raw_sku, raw_name=""):
+    """把檔案上的料號對應到我方商品:先比我方 SKU,再比跨公司別名,最後比品名。
+    回傳 (product_id, match_type, match_note)。"""
+    if raw_sku:
+        row = db.execute("SELECT id FROM products WHERE sku = ? COLLATE NOCASE", (raw_sku,)).fetchone()
+        if row:
+            return row["id"], "sku", ""
+        # 供應商用自己的料號時,靠既有的跨公司料號對照找回我方商品
+        row = db.execute(
+            "SELECT product_id, company FROM part_aliases WHERE alias_sku = ? COLLATE NOCASE",
+            (raw_sku,)).fetchone()
+        if row:
+            return row["product_id"], "alias", row["company"]
+    if raw_name:
+        row = db.execute("SELECT id FROM products WHERE name = ? COLLATE NOCASE", (raw_name,)).fetchone()
+        if row:
+            return row["id"], "sku", "品名相符"
+    return None, "none", ""
+
+
+def parse_receipt_rows(db, rows):
+    """把資料列轉成收貨明細;逐列比對料號。回傳 [(line_no, dict)]。"""
+    items = []
+    for line_no, row in rows:
+        row = list(row) + [""] * (7 - len(row))
+        raw_sku, raw_name, qty_s, lot_no, expiry, cost_s, note = [str(c).strip() for c in row[:7]]
+        if not raw_sku and not raw_name:
+            continue
+        qty = safe_int(qty_s) or 0
+        if qty < 0 or qty > MAX_QUANTITY:
+            qty = 0
+        try:
+            cost = float(cost_s) if cost_s else None
+            if cost is not None and (not math.isfinite(cost) or cost < 0 or cost > MAX_QUANTITY):
+                cost = None
+        except (ValueError, TypeError, OverflowError):
+            cost = None
+        pid, mtype, mnote = match_part(db, raw_sku, raw_name)
+        items.append({
+            "line_no": line_no, "raw_sku": raw_sku, "raw_name": raw_name,
+            "product_id": pid, "match_type": mtype, "match_note": mnote,
+            "expected_qty": qty, "lot_no": lot_no, "expiry_date": expiry,
+            "unit_cost": cost, "note": note,
+        })
+    return items
+
+
+@app.route("/receipts")
+@login_required
+def receipts_page(error=None, msg=None):
+    db = get_db()
+    rows = []
+    for r in db.execute("""
+            SELECT r.*,
+                   (SELECT COUNT(*) FROM receipt_items i WHERE i.receipt_id = r.id) AS item_count,
+                   (SELECT COUNT(*) FROM receipt_items i
+                     WHERE i.receipt_id = r.id AND i.received_qty IS NOT NULL) AS checked_count
+            FROM receipts r ORDER BY r.id DESC LIMIT 100
+        """).fetchall():
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        rows.append(d)
+    suppliers = db.execute("SELECT id, name FROM suppliers ORDER BY name").fetchall()
+    return render_page(PAGE_RECEIPTS, rows=rows, suppliers=suppliers, error=error, msg=msg)
+
+
+@app.route("/receipts/template.csv")
+@login_required
+def receipt_template():
+    # 空白範例檔:使用者可直接把這個格式轉給供應商填
+    return csv_response(RECEIPT_HEADER,
+                        [("ABC-001", "範例品名", "100", "LOT-2026A", "2027-12-31", "12.5", "此列為範例,請刪除")],
+                        "receipt_template.csv")
+
+
+@app.route("/receipts/upload", methods=["POST"])
+@login_required
+def receipt_upload():
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return receipts_page(error="請先選擇到貨明細檔案(Excel 或 CSV)")
+    rows, error = read_table_file(file.filename, file.read())
+    if error:
+        return receipts_page(error=error)
+    db = get_db()
+    items = parse_receipt_rows(db, rows[1:])   # 略過標題列
+    if not items:
+        return receipts_page(error="檔案中沒有可讀取的明細資料,請確認格式:料號,品名,數量,批號,效期,單價,備註")
+    supplier_id = safe_int(request.form.get("supplier_id", ""))
+    supplier_name = ""
+    if supplier_id is not None:
+        srow = db.execute("SELECT name FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+        supplier_name = srow["name"] if srow else ""
+        if srow is None:
+            supplier_id = None
+    ts = now_str()
+    cur = db.execute("""
+        INSERT INTO receipts (ref_no, supplier_id, supplier_name, source, status,
+                              note, username, created_at)
+        VALUES (?, ?, ?, ?, 'open', ?, ?, ?)
+    """, (request.form.get("ref_no", "").strip(), supplier_id, supplier_name,
+          f"檔案上傳:{file.filename}", request.form.get("note", "").strip(),
+          session.get("username", ""), ts))
+    rid = cur.lastrowid
+    for it in items:
+        db.execute("""
+            INSERT INTO receipt_items (receipt_id, line_no, raw_sku, raw_name, product_id,
+                                       match_type, match_note, expected_qty, lot_no,
+                                       expiry_date, unit_cost, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (rid, it["line_no"], it["raw_sku"], it["raw_name"], it["product_id"],
+              it["match_type"], it["match_note"], it["expected_qty"], it["lot_no"],
+              it["expiry_date"], it["unit_cost"], it["note"]))
+    unmatched = sum(1 for i in items if i["product_id"] is None)
+    audit("建立收貨單", "收貨", rid,
+          f"{file.filename}:{len(items)} 列,未對應 {unmatched} 列")
+    db.commit()
+    return redirect(url_for("receipt_detail", rid=rid))
+
+
+def render_receipt_detail(rid, error=None, msg=None):
+    db = get_db()
+    r = db.execute("SELECT * FROM receipts WHERE id = ?", (rid,)).fetchone()
+    if r is None:
+        return receipts_page(error="找不到指定的收貨單")
+    rd = dict(r)
+    rd["created_local"] = fmt_local(r["created_at"])
+    rd["posted_local"] = fmt_local(r["posted_at"]) if r["posted_at"] else ""
+    items = []
+    for row in db.execute("""
+            SELECT i.*, p.sku AS psku, p.name AS pname FROM receipt_items i
+            LEFT JOIN products p ON i.product_id = p.id
+            WHERE i.receipt_id = ? ORDER BY i.line_no, i.id
+        """, (rid,)).fetchall():
+        d = dict(row)
+        label = MATCH_LABELS.get(row["match_type"], row["match_type"])
+        if row["match_type"] == "alias" and row["match_note"]:
+            label = f"別名:{row['match_note']}"
+        d["match_label"] = label
+        items.append(d)
+    checked = sum(1 for i in items if i["received_qty"] is not None)
+    unmatched = sum(1 for i in items if i["product_id"] is None)
+    total_qty = sum(i["expected_qty"] for i in items)
+    return render_page(PAGE_RECEIPT_DETAIL, r=rd, items=items, total=len(items),
+                       checked=checked, unmatched=unmatched, total_qty=total_qty,
+                       product_list=product_dropdown(), error=error, msg=msg)
+
+
+@app.route("/receipts/<int:rid>")
+@login_required
+def receipt_detail(rid):
+    return render_receipt_detail(rid)
+
+
+def open_receipt_or_error(rid):
+    """取回可編輯的收貨單;不可編輯時回 (None, 錯誤訊息)。"""
+    r = get_db().execute("SELECT * FROM receipts WHERE id = ?", (rid,)).fetchone()
+    if r is None:
+        return None, "找不到指定的收貨單"
+    if r["status"] == "posted":
+        return None, "此收貨單已放行,不可再修改"
+    if r["status"] == "cancelled":
+        return None, "此收貨單已作廢,不可再修改"
+    return r, None
+
+
+@app.route("/receipts/<int:rid>/items/<int:item_id>/map", methods=["POST"])
+@login_required
+def receipt_item_map(rid, item_id):
+    r, err = open_receipt_or_error(rid)
+    if err:
+        return receipts_page(error=err) if r is None and "找不到" in err else render_receipt_detail(rid, error=err)
+    db = get_db()
+    pid = safe_int(request.form.get("product_id", ""))
+    if pid is None:
+        return render_receipt_detail(rid, error="請選擇要對應的我方商品")
+    item = db.execute("SELECT * FROM receipt_items WHERE id = ? AND receipt_id = ?",
+                      (item_id, rid)).fetchone()
+    if item is None:
+        return render_receipt_detail(rid, error="找不到指定的明細列")
+    if db.execute("SELECT 1 FROM products WHERE id = ?", (pid,)).fetchone() is None:
+        return render_receipt_detail(rid, error="找不到指定的商品")
+    db.execute("UPDATE receipt_items SET product_id = ?, match_type = 'manual', match_note = '' WHERE id = ?",
+               (pid, item_id))
+    remembered = ""
+    # 記住對應:把供應商的料號寫成跨公司別名,下次同一家送同樣的料就自動對上
+    if request.form.get("remember") and r["supplier_name"] and item["raw_sku"]:
+        try:
+            db.execute("""
+                INSERT INTO part_aliases (product_id, company, alias_sku, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (pid, r["supplier_name"], item["raw_sku"], f"收貨單 {r['ref_no'] or rid} 建立", now_str()))
+            remembered = ",並記住為別名"
+            audit("新增別名", "商品", pid, f"{r['supplier_name']}:{item['raw_sku']}(收貨單對應)")
+        except sqlite3.IntegrityError:
+            pass  # 已有相同對應,不覆蓋
+    db.commit()
+    return render_receipt_detail(rid, msg=f"已對應第 {item['line_no']} 列{remembered}")
+
+
+@app.route("/receipts/<int:rid>/items/<int:item_id>/check", methods=["POST"])
+@login_required
+def receipt_item_check(rid, item_id):
+    r, err = open_receipt_or_error(rid)
+    if err:
+        return receipts_page(error=err) if r is None and "找不到" in err else render_receipt_detail(rid, error=err)
+    qty = safe_int(request.form.get("received_qty", ""))
+    if qty is None or qty < 0:
+        return render_receipt_detail(rid, error="實收數必須為 0 或正整數")
+    if qty > MAX_QUANTITY:
+        return render_receipt_detail(rid, error="實收數過大,請確認輸入")
+    db = get_db()
+    cur = db.execute("""
+        UPDATE receipt_items SET received_qty = ?, note = ?, checked_at = ?
+        WHERE id = ? AND receipt_id = ?
+    """, (qty, request.form.get("note", "").strip(), now_str(), item_id, rid))
+    if cur.rowcount == 0:
+        return render_receipt_detail(rid, error="找不到指定的明細列")
+    db.commit()
+    return redirect(url_for("receipt_detail", rid=rid))
+
+
+@app.route("/receipts/<int:rid>/post", methods=["POST"])
+@login_required
+def receipt_post(rid):
+    db = get_db()
+    r = db.execute("SELECT * FROM receipts WHERE id = ?", (rid,)).fetchone()
+    if r is None:
+        return receipts_page(error="找不到指定的收貨單")
+    if r["status"] == "posted":
+        return render_receipt_detail(rid, error="此收貨單已放行,不可重複放行")
+    if r["status"] == "cancelled":
+        return render_receipt_detail(rid, error="此收貨單已作廢,無法放行")
+    items = db.execute("SELECT * FROM receipt_items WHERE receipt_id = ? ORDER BY line_no, id",
+                       (rid,)).fetchall()
+    # 有料進來卻對不到帳,是庫存失準最常見的起點,寧可擋下也不要放行
+    blocked = [i for i in items if i["product_id"] is None and (i["received_qty"] or 0) > 0]
+    if blocked:
+        lines = "、".join(str(i["line_no"]) for i in blocked)
+        return render_receipt_detail(
+            rid, error=f"尚有未對應的料號(第 {lines} 列)有實收數量,請先指定我方商品再放行")
+    postable = [i for i in items if i["product_id"] is not None and (i["received_qty"] or 0) > 0]
+    if not postable:
+        return render_receipt_detail(rid, error="沒有可入庫的明細:請先核對實收數量(實收為 0 的列會被略過)")
+    ts = now_str()
+    ref = r["ref_no"] or f"#{rid}"
+    total_qty = 0
+    for it in items:
+        if it["product_id"] is None or not (it["received_qty"] or 0) > 0:
+            continue
+        pid, qty = it["product_id"], it["received_qty"]
+        note = f"收貨單 {ref}" + (f":{it['note']}" if it["note"] else "")
+        db.execute("UPDATE products SET quantity = quantity + ? WHERE id = ?", (qty, pid))
+        cur = db.execute("""
+            INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at)
+            VALUES (?, ?, 'in', ?, ?, ?, ?)
+        """, (pid, session["user_id"], qty, note, f"收貨 {ref}", ts))
+        tx_id = cur.lastrowid
+        lot_no = it["lot_no"] or f"R{rid}-{tx_id}"
+        try:
+            db.execute("""
+                INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                                  qty_remaining, unit_cost, note, received_at, expiry_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (pid, tx_id, lot_no, qty, qty, it["unit_cost"], note, ts, it["expiry_date"] or ""))
+        except sqlite3.IntegrityError:
+            # 同商品批號重複:改用不會撞號的自動批號,維持批次帳恆等式
+            db.execute("""
+                INSERT INTO lots (product_id, transaction_id, lot_no, qty_received,
+                                  qty_remaining, unit_cost, note, received_at, expiry_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (pid, tx_id, f"R{rid}-{tx_id}", qty, qty, it["unit_cost"],
+                  f"{note}(原批號 {lot_no} 重複)", ts, it["expiry_date"] or ""))
+        total_qty += qty
+    db.execute("UPDATE receipts SET status = 'posted', posted_at = ? WHERE id = ?", (ts, rid))
+    audit("收貨單放行", "收貨", rid, f"{ref}:入庫 {len(postable)} 項,合計 {total_qty}")
+    db.commit()
+    return render_receipt_detail(rid, msg=f"放行完成:{len(postable)} 項已入庫,合計 {total_qty}")
+
+
+@app.route("/receipts/<int:rid>/cancel", methods=["POST"])
+@admin_required
+def receipt_cancel(rid):
+    db = get_db()
+    r = db.execute("SELECT * FROM receipts WHERE id = ?", (rid,)).fetchone()
+    if r is None:
+        return receipts_page(error="找不到指定的收貨單")
+    if r["status"] == "posted":
+        return render_receipt_detail(rid, error="此收貨單已放行,不可作廢")
+    db.execute("UPDATE receipts SET status = 'cancelled' WHERE id = ?", (rid,))
+    audit("收貨單作廢", "收貨", rid, r["ref_no"] or f"#{rid}")
+    db.commit()
+    return redirect(url_for("receipt_detail", rid=rid))
+
+
+# ---------------------------------------------------------------------------
 # 預留 / 可用量
 # ---------------------------------------------------------------------------
 
@@ -3241,6 +3760,60 @@ def decode_csv_bytes(raw):
     return None
 
 
+EXCEL_EXTS = (".xlsx", ".xlsm")
+
+
+def cell_to_text(value):
+    # Excel 儲存格轉乾淨字串:數字欄讀回來是 float(100.0),日期是 datetime,
+    # 直接 str() 會讓「數量 100」變成「100.0」而使整列匯入失敗
+    if value is None:
+        return ""
+    if hasattr(value, "strftime"):          # date / datetime
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    return str(value).strip()
+
+
+def read_table_file(filename, raw):
+    """把上傳的表格檔讀成 [(行號, [欄位字串...])];回傳 (rows, error)。
+    支援 Excel(.xlsx/.xlsm)、CSV、Tab 分隔(.tsv/.txt 或內容自動偵測)。"""
+    name = (filename or "").lower()
+    if name.endswith(EXCEL_EXTS):
+        if not HAS_OPENPYXL:
+            return None, ("此主機未安裝 openpyxl,無法讀取 Excel。"
+                          "請改用 CSV,或執行 pip install -r requirements.txt 後重新啟動。")
+        try:
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            ws = wb.active
+            rows = []
+            for i, r in enumerate(ws.iter_rows(values_only=True), start=1):
+                cells = [cell_to_text(c) for c in r]
+                if any(cells):              # Excel 常有殘留空列,整列空白就略過
+                    rows.append((i, cells))
+            wb.close()
+            return rows, None
+        except Exception:
+            return None, "Excel 檔案無法讀取,請確認檔案未損毀,且為 .xlsx 格式"
+    if name.endswith(".xls"):
+        return None, "不支援舊版 .xls 格式,請用 Excel 另存為 .xlsx 後再上傳"
+    text = decode_csv_bytes(raw)
+    if text is None:
+        return None, "無法辨識檔案編碼,請使用 UTF-8 或 Big5(cp950)編碼"
+    first_line = text.split("\n", 1)[0]
+    # 從副檔名或首列內容判斷分隔符,讓「從系統匯出的 Tab 檔」也能直接上傳
+    delimiter = "\t" if (name.endswith((".tsv", ".txt"))
+                         or first_line.count("\t") > first_line.count(",")) else ","
+    rows = []
+    for i, r in enumerate(csv.reader(io.StringIO(text), delimiter=delimiter), start=1):
+        cells = [c.strip() for c in r]
+        if any(cells):
+            rows.append((i, cells))
+    return rows, None
+
+
 def import_products_rows(rows):
     # 欄位:SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存(第一列為標題)
     db = get_db()
@@ -3345,14 +3918,11 @@ def csv_import():
         mode = request.form.get("mode", "products")
         file = request.files.get("csv_file")
         if not file or not file.filename:
-            error = "請先選擇 CSV 檔案"
+            error = "請先選擇檔案(Excel 或 CSV)"
         else:
-            text = decode_csv_bytes(file.read())
-            if text is None:
-                error = "無法辨識檔案編碼,請使用 UTF-8 或 Big5(cp950)編碼的 CSV"
-            else:
-                all_rows = list(csv.reader(io.StringIO(text)))
-                data_rows = [(i + 1, r) for i, r in enumerate(all_rows)][1:]  # 略過標題列
+            all_rows, error = read_table_file(file.filename, file.read())
+            if not error:
+                data_rows = all_rows[1:]  # 略過標題列
                 if mode == "aliases":
                     ok_count, report_rows = import_aliases_rows(data_rows)
                 else:
@@ -3363,7 +3933,7 @@ def csv_import():
                       f"檔名 {file.filename},成功 {ok_count} 筆、跳過 {skip_count} 筆")
                 db.commit()
     return render_page(PAGE_IMPORT, report_rows=report_rows, ok_count=ok_count,
-                       skip_count=skip_count, error=error,
+                       skip_count=skip_count, error=error, has_openpyxl=HAS_OPENPYXL,
                        msg=f"成功匯入 {ok_count} 筆,跳過 {skip_count} 筆" if report_rows is not None and not error else None)
 
 
