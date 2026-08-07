@@ -8,6 +8,7 @@
 #   FIFO 消耗、批次帳恆等式、加權平均成本、ABC 分級、庫齡分桶、
 #   權限控制、輸入邊界、CSV 匯入韌性、CSV 公式注入防護。
 
+import io
 import os
 import sqlite3
 import tempfile
@@ -693,6 +694,142 @@ class TestCountPermissions(unittest.TestCase):
         self.assertEqual(
             self.staff.post("/counts/new", data={"name": "不該建成", "scope": "all"}).status_code,
             403)
+
+
+class TestReceipts(InventoryTestBase):
+    """收貨單(ASN):預先登記不動庫存、料號自動比對、放行才入庫。"""
+
+    def _upload(self, csv_text, ref_no="DN-T1", supplier_id=""):
+        data = {"ref_no": ref_no, "supplier_id": supplier_id,
+                "file": (io.BytesIO(csv_text.encode("utf-8")), "receipt.csv")}
+        return self.client.post("/receipts/upload", data=data,
+                                content_type="multipart/form-data")
+
+    def _receipt_id(self, ref_no):
+        with self.db() as conn:
+            return conn.execute("SELECT id FROM receipts WHERE ref_no = ?", (ref_no,)).fetchone()["id"]
+
+    def _items(self, rid):
+        with self.db() as conn:
+            return conn.execute(
+                "SELECT * FROM receipt_items WHERE receipt_id = ? ORDER BY line_no", (rid,)).fetchall()
+
+    def test_upload_does_not_touch_stock(self):
+        pid = self.new_product("RCP-001")
+        self.stock_in(pid, 10)
+        with self.db() as conn:
+            before_qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+            before_tx = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        self._upload("料號,品名,數量\nRCP-001,測試品,99\n", ref_no="DN-NOSTOCK")
+        with self.db() as conn:
+            after_qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+            after_tx = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        self.assertEqual(after_qty, before_qty, "預先登記不得改變庫存")
+        self.assertEqual(after_tx, before_tx, "預先登記不得產生異動")
+
+    def test_match_by_alias(self):
+        pid = self.new_product("RCP-002")
+        self.client.post(f"/products/{pid}/aliases",
+                         data={"company": "友達", "alias_sku": "AUO-XX1"})
+        self._upload("料號,品名,數量\nAUO-XX1,對方料號,5\n", ref_no="DN-ALIAS")
+        item = self._items(self._receipt_id("DN-ALIAS"))[0]
+        self.assertEqual(item["match_type"], "alias")
+        self.assertEqual(item["product_id"], pid)
+
+    def test_unmatched_line_is_flagged_not_dropped(self):
+        self._upload("料號,品名,數量\nNOPE-123,查無此料,7\n", ref_no="DN-NOMATCH")
+        items = self._items(self._receipt_id("DN-NOMATCH"))
+        self.assertEqual(len(items), 1, "對不上的列必須保留讓人處理,不可靜默丟棄")
+        self.assertIsNone(items[0]["product_id"])
+        self.assertEqual(items[0]["match_type"], "none")
+
+    def test_post_creates_stock_and_keeps_ledger(self):
+        pid = self.new_product("RCP-003")
+        self._upload("料號,品名,數量,批號,效期,單價\nRCP-003,測試品,40,LOT-A,2030-01-01,3.5\n",
+                     ref_no="DN-POST")
+        rid = self._receipt_id("DN-POST")
+        item = self._items(rid)[0]
+        self.client.post(f"/receipts/{rid}/items/{item['id']}/check", data={"received_qty": "38"})
+        resp = self.client.post(f"/receipts/{rid}/post")
+        self.assertIn("放行完成", resp.get_data(as_text=True))
+        with self.db() as conn:
+            qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+            lot = conn.execute("SELECT * FROM lots WHERE lot_no = 'LOT-A'").fetchone()
+            status = conn.execute("SELECT status FROM receipts WHERE id = ?", (rid,)).fetchone()[0]
+        self.assertEqual(qty, 38, "放行後庫存應等於實收數而非通知量")
+        self.assertEqual(lot["qty_remaining"], 38)
+        self.assertEqual(lot["expiry_date"], "2030-01-01")
+        self.assertAlmostEqual(lot["unit_cost"], 3.5)
+        self.assertEqual(status, "posted")
+        self.assert_lot_ledger_balanced()
+
+    def test_post_is_idempotent(self):
+        pid = self.new_product("RCP-004")
+        self._upload("料號,品名,數量\nRCP-004,測試品,20\n", ref_no="DN-TWICE")
+        rid = self._receipt_id("DN-TWICE")
+        item = self._items(rid)[0]
+        self.client.post(f"/receipts/{rid}/items/{item['id']}/check", data={"received_qty": "20"})
+        self.client.post(f"/receipts/{rid}/post")
+        resp = self.client.post(f"/receipts/{rid}/post")
+        self.assertIn("已放行", resp.get_data(as_text=True))
+        with self.db() as conn:
+            qty = conn.execute("SELECT quantity FROM products WHERE id = ?", (pid,)).fetchone()[0]
+        self.assertEqual(qty, 20, "重複放行不得重複加庫存")
+
+    def test_post_blocked_when_unmatched_has_qty(self):
+        self._upload("料號,品名,數量\nGHOST-1,幽靈料,9\n", ref_no="DN-BLOCK")
+        rid = self._receipt_id("DN-BLOCK")
+        item = self._items(rid)[0]
+        self.client.post(f"/receipts/{rid}/items/{item['id']}/check", data={"received_qty": "9"})
+        resp = self.client.post(f"/receipts/{rid}/post")
+        self.assertIn("尚有未對應", resp.get_data(as_text=True))
+        with self.db() as conn:
+            status = conn.execute("SELECT status FROM receipts WHERE id = ?", (rid,)).fetchone()[0]
+        self.assertEqual(status, "open")
+
+    def test_manual_map_can_remember_alias(self):
+        pid = self.new_product("RCP-005")
+        self.client.post("/suppliers/new", data={"name": "記憶測試商"})
+        with self.db() as conn:
+            sid = conn.execute("SELECT id FROM suppliers WHERE name = ?", ("記憶測試商",)).fetchone()[0]
+        self._upload("料號,品名,數量\nTHEIR-777,對方料,4\n", ref_no="DN-REMEMBER", supplier_id=str(sid))
+        rid = self._receipt_id("DN-REMEMBER")
+        item = self._items(rid)[0]
+        self.client.post(f"/receipts/{rid}/items/{item['id']}/map",
+                         data={"product_id": str(pid), "remember": "1"})
+        with self.db() as conn:
+            alias = conn.execute(
+                "SELECT * FROM part_aliases WHERE alias_sku = ?", ("THEIR-777",)).fetchone()
+        self.assertIsNotNone(alias, "勾選記住時應建立跨公司別名")
+        self.assertEqual(alias["product_id"], pid)
+
+
+class TestTableFileReader(unittest.TestCase):
+    """多格式讀檔:Excel 數字/日期轉換、Tab 偵測、舊格式友善拒絕。"""
+
+    def test_excel_numeric_cell_becomes_clean_int(self):
+        self.assertEqual(app_module.cell_to_text(100.0), "100")
+        self.assertEqual(app_module.cell_to_text(12.5), "12.5")
+        self.assertEqual(app_module.cell_to_text(None), "")
+
+    def test_excel_date_cell_becomes_iso(self):
+        from datetime import datetime as _dt
+        self.assertEqual(app_module.cell_to_text(_dt(2027, 3, 9)), "2027-03-09")
+
+    def test_tab_delimiter_detected(self):
+        rows, err = app_module.read_table_file("x.csv", "A\tB\tC\n1\t2\t3\n".encode("utf-8"))
+        self.assertIsNone(err)
+        self.assertEqual(rows[1][1], ["1", "2", "3"])
+
+    def test_blank_rows_skipped(self):
+        rows, err = app_module.read_table_file("x.csv", "A,B\n\n1,2\n".encode("utf-8"))
+        self.assertIsNone(err)
+        self.assertEqual(len(rows), 2, "整列空白應略過")
+
+    def test_legacy_xls_rejected_with_message(self):
+        rows, err = app_module.read_table_file("old.xls", b"whatever")
+        self.assertIsNone(rows)
+        self.assertIn(".xlsx", err)
 
 
 def math_ceil(x):
