@@ -632,22 +632,53 @@ LAYOUT = """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>庫存管理系統</title>
     <style>
+        /* 色彩代幣:深藏青 + 琥珀(工業倉儲識別色),使用者要求「大膽、不死板」 */
+        :root { --ink: #17223b; --ink-2: #1f2e50; --ink-line: #32436b;
+                --accent: #f5a31a; --accent-deep: #e08e00; --accent-ink: #241503;
+                --paper: #e9edf3; --card: #fff; --line: #dde3ec;
+                --text: #1e293b; --mute: #64748b;
+                --blue: #2563eb; --green: #15803d; --red: #b91c1c; --violet: #7c3aed; --teal: #0d9488; }
         * { box-sizing: border-box; }
-        body { margin: 0; background: #eef2f6; color: #1e293b; font-size: 15px; line-height: 1.55;
+        body { margin: 0; background: var(--paper); color: var(--text); font-size: 15px; line-height: 1.55;
                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
-        nav { position: sticky; top: 0; z-index: 10; background: #1e293b; display: flex; align-items: center;
-              gap: 2px; padding: 0 12px; overflow-x: auto; white-space: nowrap; box-shadow: 0 1px 4px rgba(15,23,42,.25); }
-        nav a { color: #cbd5e1; text-decoration: none; padding: 13px 10px; font-size: 14px; border-bottom: 2px solid transparent; }
-        nav a:hover { color: #fff; border-bottom-color: #60a5fa; }
-        nav a.active { color: #fff; border-bottom-color: #3b82f6; }
-        nav .user-info { margin-left: auto; color: #94a3b8; font-size: 13px; padding-left: 12px; }
-        .container { max-width: 1080px; margin: 22px auto; background: #fff; padding: 22px 26px 26px;
-                     border-radius: 14px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
-        h1 { font-size: 21px; margin: 0 0 14px; color: #0f172a; }
-        h2 { font-size: 16px; margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid #2563eb; }
+        nav { position: sticky; top: 0; z-index: 10; background: var(--ink); display: flex; align-items: stretch;
+              gap: 2px; padding: 0 14px; box-shadow: 0 2px 8px rgba(15,23,42,.3); }
+        nav .brand { display: flex; align-items: center; gap: 7px; color: #fff; text-decoration: none;
+                     font-weight: 800; font-size: 15px; letter-spacing: .04em; padding: 12px 10px 12px 0; margin-right: 6px; }
+        nav .brand .brand-mark { display: inline-block; width: 12px; height: 12px; background: var(--accent);
+                                 border-radius: 3px; box-shadow: 3px -3px 0 0 rgba(245,163,26,.35); }
+        nav > a.top, nav summary { display: flex; align-items: center; color: #c3cde0; text-decoration: none;
+              padding: 13px 12px; font-size: 14px; font-weight: 600; border-bottom: 3px solid transparent; cursor: pointer; }
+        nav > a.top:hover, nav summary:hover { color: #fff; }
+        nav > a.top.active { color: #fff; border-bottom-color: var(--accent); }
+        nav details.menu { position: relative; }
+        nav details.menu > summary { list-style: none; gap: 5px; user-select: none; height: 100%; }
+        nav details.menu > summary::-webkit-details-marker { display: none; }
+        nav details.menu > summary::after { content: "▾"; font-size: 10px; opacity: .65; }
+        nav details.menu[open] > summary { color: #fff; background: var(--ink-2); }
+        nav details.menu.here > summary { color: #fff; border-bottom-color: var(--accent); }
+        nav .menu-panel { position: absolute; top: 100%; left: 0; min-width: 172px; background: var(--card);
+                          border: 1px solid var(--line); border-radius: 0 10px 10px 10px; padding: 6px;
+                          box-shadow: 0 14px 30px rgba(23,34,59,.22); z-index: 20; }
+        nav .menu-panel a { display: block; color: var(--text); text-decoration: none; padding: 9px 13px;
+                            border-radius: 7px; font-size: 14px; white-space: nowrap; }
+        nav .menu-panel a:hover { background: #f2f6fc; color: var(--blue); }
+        nav .menu-panel a.active { background: #fff3d6; color: #92400e; font-weight: 700; }
+        nav .user-info { margin-left: auto; display: flex; align-items: center; color: #8fa0be; font-size: 13px; padding-left: 12px; }
+        nav .user-info a { color: #c3cde0; }
+        .container { max-width: 1100px; margin: 24px auto; background: var(--card); padding: 24px 28px 28px;
+                     border-radius: 14px; border: 1px solid var(--line); box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+        /* 頁標題:琥珀色識別條,每頁自動帶入(大膽識別,不必逐頁改) */
+        h1 { font-size: 23px; font-weight: 800; letter-spacing: -.01em; margin: 0 0 16px; color: #0f172a;
+             position: relative; padding-left: 15px; }
+        h1::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 5px;
+                     background: var(--accent); border-radius: 3px; }
+        h2 { font-size: 16px; margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid var(--accent); }
         table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 14px; }
-        th, td { border: 1px solid #e2e8f0; padding: 9px 11px; text-align: left; vertical-align: middle; }
-        th { background: #f1f5f9; color: #334155; font-size: 13px; }
+        th, td { border: 1px solid var(--line); padding: 9px 11px; text-align: left; vertical-align: middle; }
+        /* 深色表頭:表格是本系統的主角,給它舞台感 */
+        th { background: var(--ink); color: #dbe3f2; font-size: 13px; font-weight: 600;
+             border-color: var(--ink-line); letter-spacing: .02em; word-break: keep-all; }
         tr:not(.low-stock):hover td { background: #f8fafc; }
         td[id^="qty-"] { font-weight: 700; font-size: 16px; color: #0f172a; }
         th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -658,8 +689,8 @@ LAYOUT = """
         .msg { padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 14px; }
         .msg.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
         .msg.ok { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-        .banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 11px 14px;
-                  border-radius: 10px; margin-bottom: 14px; }
+        .banner { background: #fffbeb; border: 1px solid #fde68a; border-left: 5px solid var(--accent);
+                  color: #92400e; padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-weight: 600; }
         .banner a { display: inline-block; padding: 4px 0; }
         .note { color: #64748b; font-size: 13px; }
         .pager { margin-top: 14px; font-size: 14px; }
@@ -680,11 +711,15 @@ LAYOUT = """
             .label, .qr-img { background: #fff; }
         }
         .stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 18px; }
-        .stat-box { flex: 1 1 130px; background: #f8fafc; border: 1px solid #e2e8f0;
+        /* KPI 色塊:每張卡輪流帶一個識別色的粗頂邊,擺脫整排灰盒 */
+        .stat-box { flex: 1 1 130px; background: #f8fafc; border: 1px solid var(--line); border-top: 4px solid var(--blue);
                     border-radius: 10px; padding: 12px 16px; }
-        .stat-num { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums;
+        .stat-row .stat-box:nth-child(4n+2) { border-top-color: var(--green); }
+        .stat-row .stat-box:nth-child(4n+3) { border-top-color: var(--accent); }
+        .stat-row .stat-box:nth-child(4n)   { border-top-color: var(--violet); }
+        .stat-num { font-size: 27px; font-weight: 800; font-variant-numeric: tabular-nums;
                     letter-spacing: -.02em; color: #0f172a; }
-        .stat-cap { font-size: 12.5px; color: #64748b; margin-top: 2px; }
+        .stat-cap { font-size: 12.5px; color: var(--mute); margin-top: 2px; }
         .count-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         .count-input { width: 90px !important; margin-top: 0 !important; text-align: right; }
         .count-note { width: 130px !important; margin-top: 0 !important; font-size: 13px; }
@@ -711,11 +746,13 @@ LAYOUT = """
         input[type=text], input[type=password], input[type=number], input[type=date], select {
             width: 100%; max-width: 420px; padding: 9px 11px; margin-top: 5px; font-size: 16px;
             border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
-        input:focus, select:focus { outline: 2px solid #bfdbfe; border-color: #2563eb; }
+        input:focus, select:focus { outline: 2px solid #fcd34d; border-color: var(--accent-deep); }
         input[type=file] { margin-top: 6px; font-size: 14px; }
-        input[type=submit], button { display: block; padding: 10px 20px; margin-top: 14px; font-size: 15px; font-weight: 600;
-            color: #fff; background: #2563eb; border: none; border-radius: 8px; cursor: pointer; }
-        input[type=submit]:hover, button:hover { background: #1d4ed8; }
+        /* 主按鈕改琥珀主色:整個系統的「動作」都掛同一個識別色 */
+        input[type=submit], button { display: block; padding: 10px 22px; margin-top: 14px; font-size: 15px; font-weight: 700;
+            color: var(--accent-ink); background: var(--accent); border: none; border-radius: 8px; cursor: pointer;
+            box-shadow: 0 1px 2px rgba(224,142,0,.35); }
+        input[type=submit]:hover, button:hover { background: var(--accent-deep); }
         .small-btn { display: inline-block; padding: 4px 10px; margin: 0; font-size: 12px; font-weight: 600;
                      color: #b91c1c; background: transparent; border: 1px solid transparent; border-radius: 6px; }
         .small-btn:hover { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
@@ -749,7 +786,7 @@ LAYOUT = """
         .quick-actions a { display: block; text-align: center; background: #f8fafc; border: 1px solid #e2e8f0;
                            border-radius: 12px; padding: 12px 6px; text-decoration: none; color: #1e293b;
                            font-size: 13px; font-weight: 600; }
-        .quick-actions a:hover { border-color: #93c5fd; background: #eff6ff; }
+        .quick-actions a:hover { border-color: var(--accent); background: #fff8ea; }
         .quick-actions .qa-icon { display: block; font-size: 22px; margin-bottom: 4px; }
         .qa-in { color: #15803d; font-weight: 700; }
         .qa-out { color: #b45309; font-weight: 700; }
@@ -762,9 +799,18 @@ LAYOUT = """
         .container:has(.auth-box) { max-width: 440px; margin-top: 9vh; }
         @media (max-width: 760px) {
             .container { margin: 10px; padding: 16px 14px 20px; border-radius: 12px; }
-            /* 導覽列換行完整顯示,不靠橫向捲動(使用者才找得到全部功能與登出) */
-            nav { flex-wrap: wrap; white-space: normal; overflow-x: visible; position: static; padding: 2px 10px; }
-            nav a { padding: 9px 8px; }
+            /* 手機:群組選單展開時改為推開內容(不浮動),仍是零 JS 的 details */
+            nav { flex-wrap: wrap; position: static; padding: 2px 10px 6px; align-items: flex-start; }
+            nav .brand { padding: 10px 8px 8px 0; }
+            nav > a.top, nav summary { padding: 10px 9px; height: auto; }
+            nav details.menu { position: static; }
+            /* 展開的群組獨占一列,把後面的項目往下推,不撐爆同列鄰居 */
+            nav details.menu[open] { flex-basis: 100%; }
+            nav .menu-panel { position: static; border-radius: 10px; margin: 2px 0 6px;
+                              box-shadow: none; background: var(--ink-2); border-color: var(--ink-line); }
+            nav .menu-panel a { color: #dbe3f2; padding: 11px 14px; }
+            nav .menu-panel a:hover { background: var(--ink); color: #fff; }
+            nav .menu-panel a.active { background: rgba(245,163,26,.18); color: var(--accent); }
             nav .user-info { flex-basis: 100%; padding: 2px 0 8px; }
             /* 一般表格:tbody 撐滿寬度、必要時橫向捲動 */
             table { display: block; overflow-x: auto; }
@@ -809,25 +855,47 @@ LAYOUT = """
 <body>
     {% if session.get('user_id') %}
     <nav>
-        <a {% if request.path == '/' %}class="active" {% endif %}href="{{ url_for('index') }}">庫存總覽</a>
-        <a {% if request.path == '/alerts' %}class="active" {% endif %}href="{{ url_for('alerts') }}">低庫存警示</a>
-        <a {% if request.path == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫</a>
-        <a {% if request.path == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫</a>
-        <a {% if request.path == '/history' %}class="active" {% endif %}href="{{ url_for('history') }}">異動歷史</a>
-        <a {% if request.path.startswith('/suppliers') %}class="active" {% endif %}href="{{ url_for('suppliers') }}">供應商</a>
-        <a {% if request.path == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">報表</a>
-        <a {% if request.path == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
-        <a {% if request.path == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖搜圖</a>
-        <a {% if request.path.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">盤點</a>
-        <a {% if request.path.startswith('/reservations') %}class="active" {% endif %}href="{{ url_for('reservations_page') }}">預留</a>
-        <a {% if request.path.startswith('/planning') %}class="active" {% endif %}href="{{ url_for('planning_page') }}">存貨規劃</a>
-        <a {% if request.path == '/labels' %}class="active" {% endif %}href="{{ url_for('labels_page') }}">料架標籤</a>
+        <a class="brand" href="{{ url_for('index') }}"><span class="brand-mark"></span>庫存管理</a>
+        <a class="top{% if request.path == '/' %} active{% endif %}" href="{{ url_for('index') }}">庫存總覽</a>
+        {% set navp = request.path %}
+        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/alerts') or navp.startswith('/counts') or navp.startswith('/reservations') %} here{% endif %}">
+            <summary>庫存作業</summary>
+            <div class="menu-panel">
+                <a {% if navp == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫</a>
+                <a {% if navp == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫</a>
+                <a {% if navp.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">盤點</a>
+                <a {% if navp.startswith('/reservations') %}class="active" {% endif %}href="{{ url_for('reservations_page') }}">預留</a>
+                <a {% if navp == '/alerts' %}class="active" {% endif %}href="{{ url_for('alerts') }}">低庫存警示</a>
+            </div>
+        </details>
+        <details class="menu{% if navp in ('/products/new', '/search/image', '/labels') or navp.startswith('/suppliers') %} here{% endif %}">
+            <summary>商品資料</summary>
+            <div class="menu-panel">
+                <a {% if navp == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
+                <a {% if navp.startswith('/suppliers') %}class="active" {% endif %}href="{{ url_for('suppliers') }}">供應商</a>
+                <a {% if navp == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖搜圖</a>
+                <a {% if navp == '/labels' %}class="active" {% endif %}href="{{ url_for('labels_page') }}">料架標籤</a>
+            </div>
+        </details>
+        <details class="menu{% if navp in ('/report', '/history') or navp.startswith('/planning') %} here{% endif %}">
+            <summary>分析報表</summary>
+            <div class="menu-panel">
+                <a {% if navp == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">報表</a>
+                <a {% if navp == '/history' %}class="active" {% endif %}href="{{ url_for('history') }}">異動歷史</a>
+                <a {% if navp.startswith('/planning') %}class="active" {% endif %}href="{{ url_for('planning_page') }}">存貨規劃</a>
+            </div>
+        </details>
         {% if session.get('is_admin') %}
-        <a {% if request.path == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
-        <a {% if request.path == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核軌跡</a>
-        <a {% if request.path.startswith('/users') %}class="active" {% endif %}href="{{ url_for('users_page') }}">帳號管理</a>
+        <details class="menu{% if navp in ('/import', '/audit') or navp.startswith('/users') %} here{% endif %}">
+            <summary>系統管理</summary>
+            <div class="menu-panel">
+                <a {% if navp == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
+                <a {% if navp == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核軌跡</a>
+                <a {% if navp.startswith('/users') %}class="active" {% endif %}href="{{ url_for('users_page') }}">帳號管理</a>
+            </div>
+        </details>
         {% endif %}
-        <span class="user-info">使用者:{{ session.get('username') }}{% if session.get('is_admin') %}(管理員){% endif %}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
+        <span class="user-info">{{ session.get('username') }}{% if session.get('is_admin') %}(管理員){% endif %}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
     </nav>
     {% endif %}
     <div class="container">
