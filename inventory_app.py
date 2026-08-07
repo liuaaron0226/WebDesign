@@ -2008,8 +2008,9 @@ PAGE_IMPORT = """
 <h1>大量匯入(Excel / CSV)</h1>
 <div class="import-help">
     <p><strong>商品匯入</strong>欄位順序(第一列為標題列,會被略過):<br>
-    <code>SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存</code><br>
-    SKU 與名稱必填,其餘可留空;供應商不存在時自動建立;初始庫存會寫成一筆入庫異動(備註「CSV匯入」)。</p>
+    <code>SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存,儲位</code><br>
+    SKU 與名稱必填,其餘可留空(最後的<strong>儲位為選填</strong>,舊系統搬遷時可一次帶入);
+    供應商不存在時自動建立;初始庫存會寫成一筆入庫異動(備註「CSV匯入」)。</p>
     <p><strong>別名匯入</strong>欄位順序:<br>
     <code>我方SKU,公司,別名料號,備註</code></p>
     <p><strong>支援格式</strong>:Excel(<code>.xlsx</code>)、CSV、Tab 分隔(<code>.tsv</code>/<code>.txt</code>)。
@@ -3815,14 +3816,15 @@ def read_table_file(filename, raw):
 
 
 def import_products_rows(rows):
-    # 欄位:SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存(第一列為標題)
+    # 欄位:SKU,名稱,分類,單位,單價,低庫存門檻,供應商,初始庫存[,儲位](第一列為標題)
+    # 第 9 欄儲位為選填,供舊系統搬遷時一次帶入,免得事後逐筆補
     db = get_db()
     report = []
     ok = 0
     for line_no, row in rows:
-        row = list(row) + [""] * (8 - len(row))
-        sku, name, category, unit, price_s, threshold_s, supplier_name, init_qty_s = \
-            [c.strip() for c in row[:8]]
+        row = list(row) + [""] * (9 - len(row))
+        sku, name, category, unit, price_s, threshold_s, supplier_name, init_qty_s, location = \
+            [c.strip() for c in row[:9]]
         label = f"{sku} {name}".strip()
         if not sku or not name:
             report.append({"line": line_no, "label": label or "(空列)", "status": "跳過:SKU 與名稱必填"})
@@ -3858,10 +3860,10 @@ def import_products_rows(rows):
         ts = now_str()
         cur = db.execute("""
             INSERT INTO products (name, sku, category, unit, unit_price,
-                                  low_stock_threshold, quantity, supplier_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  low_stock_threshold, quantity, supplier_id, location, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, sku, category, unit or "個", price, threshold, init_qty,
-              supplier_id, ts))
+              supplier_id, location, ts))
         new_pid = cur.lastrowid
         if init_qty > 0:  # 初始庫存寫成入庫異動 + 建立批次,維持歷史與批次帳一致
             tcur = db.execute("""
