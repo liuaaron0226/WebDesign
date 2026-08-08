@@ -44,6 +44,11 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
+# 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
+# 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
+# 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
+APP_VERSION = "2026.08.07"
+
 app = Flask(__name__)
 
 # 資料庫路徑可用環境變數覆蓋,驗收測試用 /tmp 下的乾淨 DB
@@ -979,7 +984,7 @@ LAYOUT = """
         {% if msg %}<div class="msg ok">{{ msg }}</div>{% endif %}
         __BODY__
     </div>
-    <footer>庫存管理系統 &copy; {{ year }}</footer>
+    <footer>庫存管理系統 &copy; {{ year }}　·　版本 {{ app_version }}</footer>
 </body>
 </html>
 """
@@ -1003,6 +1008,7 @@ def render_page(body, **ctx):
     ctx.setdefault("error", None)
     ctx.setdefault("msg", None)
     ctx.setdefault("year", datetime.now().year)
+    ctx.setdefault("app_version", APP_VERSION)
     return render_template_string(LAYOUT.replace("__BODY__", body), **ctx)
 
 
@@ -4025,7 +4031,7 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     start_backup_thread()   # 啟動先備份一份,之後每 24 小時自動備份
-    print(f"庫存管理系統啟動中…")
+    print(f"庫存管理系統啟動中…(版本 {APP_VERSION})")
     print(f"  資料庫:{os.path.abspath(DB_PATH)}")
     print(f"  照片:{IMAGE_DIR}")
     print(f"  備份:{BACKUP_DIR}" + (f"(另同步到 {EXTRA_BACKUP_DIR})" if EXTRA_BACKUP_DIR else ""))
