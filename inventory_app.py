@@ -706,7 +706,17 @@ LAYOUT = """
                 --accent: #f5a31a; --accent-deep: #e08e00; --accent-ink: #241503;
                 --paper: #e9edf3; --card: #fff; --line: #dde3ec;
                 --text: #1e293b; --mute: #64748b;
-                --blue: #2563eb; --green: #15803d; --red: #b91c1c; --violet: #7c3aed; --teal: #0d9488; }
+                --blue: #2563eb; --green: #15803d; --red: #b91c1c; --violet: #7c3aed; --teal: #0d9488;
+                /* 層次:陰影用藏青而非純黑,陰影才會跟版面同一個色溫 */
+                --sh-1: 0 1px 2px rgba(23,34,59,.06), 0 1px 3px rgba(23,34,59,.05);
+                --sh-2: 0 2px 4px rgba(23,34,59,.06), 0 4px 12px rgba(23,34,59,.08);
+                --sh-3: 0 8px 16px rgba(23,34,59,.10), 0 16px 32px rgba(23,34,59,.10);
+                --sh-accent: 0 1px 2px rgba(146,64,14,.20), 0 2px 8px rgba(245,163,26,.28);
+                --r-sm: 7px; --r-md: 11px; --r-lg: 15px;
+                --ease: cubic-bezier(.2,.7,.3,1); }
+        @media (prefers-reduced-motion: reduce) {
+            * { transition: none !important; animation: none !important; }
+        }
         * { box-sizing: border-box; }
         body { margin: 0; background: var(--paper); color: var(--text); font-size: 15px; line-height: 1.55;
                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
@@ -735,23 +745,50 @@ LAYOUT = """
         nav .menu-panel a.active { background: #fff3d6; color: #92400e; font-weight: 700; }
         nav .user-info { margin-left: auto; display: flex; align-items: center; color: #8fa0be; font-size: 13px; padding-left: 12px; }
         nav .user-info a { color: #c3cde0; }
-        .container { max-width: 1100px; margin: 24px auto; background: var(--card); padding: 24px 28px 28px;
-                     border-radius: 14px; border: 1px solid var(--line); box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+        /* 這是資料表為主的系統,容器給寬一點;表單頁的輸入框本來就自限 420px,不受影響 */
+        .container { max-width: 1220px; margin: 24px auto; background: var(--card); padding: 24px 28px 28px;
+                     border-radius: var(--r-lg); border: 1px solid var(--line); box-shadow: var(--sh-1); }
         /* 頁標題:琥珀色識別條,每頁自動帶入(大膽識別,不必逐頁改) */
         h1 { font-size: 23px; font-weight: 800; letter-spacing: -.01em; margin: 0 0 16px; color: #0f172a;
              position: relative; padding-left: 15px; }
         h1::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 5px;
                      background: var(--accent); border-radius: 3px; }
         h2 { font-size: 16px; margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid var(--accent); }
-        table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 14px; }
-        th, td { border: 1px solid var(--line); padding: 9px 11px; text-align: left; vertical-align: middle; }
+        /* 表格:去掉格線改用橫線分隔,資料才不會被網格切碎;整張表包在圓角卡片裡 */
+        table { border-collapse: separate; border-spacing: 0; width: 100%; margin-top: 14px;
+                font-size: 13.5px; border-radius: var(--r-md); overflow: hidden;
+                box-shadow: var(--sh-1); background: var(--card); }
+        th, td { border: none; border-bottom: 1px solid var(--line);
+                 padding: 9px 12px; text-align: left; vertical-align: middle; }
+        /* 12 欄在窄螢幕放不下,讓表格自己橫向捲動,不要把版面撐破 */
+        .table-scroll { overflow-x: auto; margin-top: 14px; border-radius: var(--r-md); }
+        .table-scroll > table { margin-top: 0; }
         /* 深色表頭:表格是本系統的主角,給它舞台感 */
-        th { background: var(--ink); color: #dbe3f2; font-size: 13px; font-weight: 600;
-             border-color: var(--ink-line); letter-spacing: .02em; word-break: keep-all; }
-        tr:not(.low-stock):hover td { background: #f8fafc; }
-        td[id^="qty-"] { font-weight: 700; font-size: 16px; color: #0f172a; }
+        th { background: var(--ink); color: #dbe3f2; font-size: 12.5px; font-weight: 600;
+             border-color: var(--ink-line); letter-spacing: .04em; word-break: keep-all;
+             position: sticky; top: 0; z-index: 2; }
+        tr:last-child td { border-bottom: none; }
+        tbody tr:nth-child(even) td { background: #f7f9fd; }
+        tr:not(.low-stock):hover td { background: #eef4fd; }
+        /* 操作欄:橫排不斷字(否則整列被撐高、按鈕被擠成兩行),
+           並釘在表格右緣——12 欄橫向捲動時,最常用的那一欄不該被推出畫面 */
+        td[data-label="操作"], th:last-child { white-space: nowrap; }
+        td[data-label="操作"] > * { vertical-align: middle; }
+        td[data-label="操作"] a.plain { margin-right: 9px; font-weight: 600; }
+        .table-scroll td[data-label="操作"], .table-scroll th:last-child {
+            position: sticky; right: 0; z-index: 1;
+            box-shadow: -8px 0 10px -8px rgba(23,34,59,.18); }
+        .table-scroll td[data-label="操作"] { background: var(--card); }
+        .table-scroll tbody tr:nth-child(even) td[data-label="操作"] { background: #f7f9fd; }
+        .table-scroll tr.low-stock td[data-label="操作"] { background: #fdf1f1; }
+        .table-scroll th:last-child { background: var(--ink); z-index: 3; }
+        /* 短欄位不換行,列高才穩定;名稱是唯一該吃掉剩餘寬度的欄 */
+        td[data-label="SKU"], td[data-label="儲位"], td[data-label="單位"] { white-space: nowrap; }
+        td[data-label="名稱"] { min-width: 190px; }
+        td[id^="qty-"] { font-weight: 800; font-size: 16.5px; color: #0f172a; letter-spacing: -.01em; }
         th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
-        tr.low-stock td { background: #fef2f2; }
+        tr.low-stock td, tr.low-stock:hover td { background: #fdf1f1; }
+        tr.low-stock td:first-child { box-shadow: inset 3px 0 0 var(--red); }
         tr.lot-empty td { color: #94a3b8; }
         .badge-low { display: inline-block; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 700;
                      padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
@@ -822,17 +859,39 @@ LAYOUT = """
             border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
         input:focus, select:focus { outline: 2px solid #fcd34d; border-color: var(--accent-deep); }
         input[type=file] { margin-top: 6px; font-size: 14px; }
-        /* 主按鈕改琥珀主色:整個系統的「動作」都掛同一個識別色 */
-        input[type=submit], button { display: block; padding: 10px 22px; margin-top: 14px; font-size: 15px; font-weight: 700;
-            color: var(--accent-ink); background: var(--accent); border: none; border-radius: 8px; cursor: pointer;
-            box-shadow: 0 1px 2px rgba(224,142,0,.35); }
-        input[type=submit]:hover, button:hover { background: var(--accent-deep); }
-        .small-btn { display: inline-block; padding: 4px 10px; margin: 0; font-size: 12px; font-weight: 600;
-                     color: #b91c1c; background: transparent; border: 1px solid transparent; border-radius: 6px; }
-        .small-btn:hover { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
-        /* 盤點的「記錄」是儲存動作,不該長得像刪除;定義於 .small-btn 之後才蓋得過紅色 */
-        .small-btn.ok-btn { color: #1d4ed8; border-color: #93c5fd; }
-        .small-btn.ok-btn:hover { background: #eff6ff; color: #1d4ed8; border-color: #60a5fa; }
+        /* 主按鈕:琥珀主色 + 上緣內光與下緣暗邊,讓它看起來是「可以按下去」的實體 */
+        input[type=submit], button {
+            display: block; padding: 11px 24px; margin-top: 16px;
+            font: inherit; font-size: 15px; font-weight: 700; letter-spacing: .02em;
+            color: var(--accent-ink); border: none; border-radius: var(--r-sm); cursor: pointer;
+            background: linear-gradient(180deg, #ffb43a 0%, var(--accent) 55%, var(--accent-deep) 100%);
+            box-shadow: var(--sh-accent), inset 0 1px 0 rgba(255,255,255,.45);
+            transition: transform .12s var(--ease), box-shadow .18s var(--ease), filter .18s var(--ease); }
+        input[type=submit]:hover, button:hover {
+            filter: brightness(1.04);
+            box-shadow: 0 2px 4px rgba(146,64,14,.22), 0 6px 16px rgba(245,163,26,.34),
+                        inset 0 1px 0 rgba(255,255,255,.5); }
+        input[type=submit]:active, button:active {
+            transform: translateY(1px);
+            box-shadow: 0 1px 2px rgba(146,64,14,.28), inset 0 1px 2px rgba(146,64,14,.25); }
+        input[type=submit]:focus-visible, button:focus-visible,
+        a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+            outline: 3px solid rgba(245,163,26,.55); outline-offset: 2px; }
+        /* 次要動作:表格內的小按鈕。預設中性,危險動作才變紅 */
+        .small-btn { display: inline-block; padding: 5px 11px; margin: 0;
+                     font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+                     color: var(--red); background: var(--card); border: 1px solid var(--line);
+                     border-radius: var(--r-sm); box-shadow: none;
+                     transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease); }
+        .small-btn:hover { background: #fef2f2; color: var(--red); border-color: #f2a9a9; }
+        .small-btn:active { transform: none; background: #fde8e8; }
+        /* 盤點的「記錄」、收貨的「核對」是儲存動作,不該長得像刪除 */
+        .small-btn.ok-btn { color: var(--blue); border-color: #bcd2f8; background: var(--card); }
+        .small-btn.ok-btn:hover { background: #eef4ff; color: #1d4ed8; border-color: #7aa5f0; }
+        /* 圖示鈕:只放圖示,靠 title/aria-label 說明,列表才擠得下 */
+        .small-btn.icon-btn { display: inline-grid; place-items: center; width: 30px; height: 30px;
+                              padding: 0; vertical-align: middle; }
+        .small-btn.icon-btn svg { width: 16px; height: 16px; display: block; }
         .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 4px; }
         .filters input, .filters select { width: auto; margin-top: 0; }
         .filters input[type=submit] { margin-top: 0; padding: 9px 16px; }
@@ -849,21 +908,42 @@ LAYOUT = """
         .import-help { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px 16px;
                        border-radius: 10px; font-size: 13px; color: #334155; }
         .import-help code { background: #eef2f6; padding: 1px 6px; border-radius: 5px; }
-        .hero-search { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
-        .hero-search input[type=text] { flex: 1 1 240px; max-width: none; margin-top: 0; padding: 12px 16px;
-                                        font-size: 16px; border-radius: 10px; }
-        .hero-search select { width: auto; margin-top: 0; border-radius: 10px; }
-        .hero-search input[type=submit] { margin-top: 0; padding: 12px 22px; border-radius: 10px; }
+        /* 搜尋是這個系統最常被按的控件,給它最大的視覺份量 */
+        .hero-search { display: flex; flex-wrap: wrap; gap: 9px; margin: 4px 0 4px; }
+        .hero-search .search-field { position: relative; flex: 1 1 260px; display: flex; }
+        .hero-search .search-field svg { position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
+                                         width: 19px; height: 19px; color: #94a2bd; pointer-events: none;
+                                         transition: color .16s var(--ease); }
+        .hero-search .search-field:focus-within svg { color: var(--accent-deep); }
+        .hero-search input[type=text] { flex: 1 1 auto; max-width: none; margin-top: 0;
+                                        padding: 13px 16px 13px 44px; font-size: 16px;
+                                        border-radius: var(--r-md); box-shadow: var(--sh-1); }
+        .hero-search select { width: auto; margin-top: 0; border-radius: var(--r-md);
+                              padding: 13px 14px; box-shadow: var(--sh-1); }
+        .hero-search input[type=submit] { margin-top: 0; padding: 13px 26px; border-radius: var(--r-md); }
         .sub-links { margin: 0 0 14px; font-size: 13px; color: #94a3b8; }
-        .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
-                         gap: 10px; margin-bottom: 16px; }
-        .quick-actions a { display: block; text-align: center; background: #f8fafc; border: 1px solid #e2e8f0;
-                           border-radius: 12px; padding: 12px 6px; text-decoration: none; color: #1e293b;
-                           font-size: 13px; font-weight: 600; }
-        .quick-actions a:hover { border-color: var(--accent); background: #fff8ea; }
-        .quick-actions .qa-icon { display: block; font-size: 22px; margin-bottom: 4px; }
-        .qa-in { color: #15803d; font-weight: 700; }
-        .qa-out { color: #b45309; font-weight: 700; }
+        /* 快速動作:圖示放在有色圓角方塊裡,滑過時整張卡浮起。
+           圖示一律用線條 SVG 而非 emoji——emoji 在不同系統長相不一,也不能跟著配色走 */
+        .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+                         gap: 10px; margin: 4px 0 20px; }
+        .quick-actions a {
+            display: flex; flex-direction: column; align-items: center; gap: 9px;
+            background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
+            padding: 15px 8px 13px; text-decoration: none; color: var(--text);
+            font-size: 13.5px; font-weight: 600; box-shadow: var(--sh-1);
+            transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
+        .quick-actions a:hover { transform: translateY(-2px); box-shadow: var(--sh-2); border-color: #c8d2e2; }
+        .quick-actions a:active { transform: translateY(0); box-shadow: var(--sh-1); }
+        .qa-icon { display: grid; place-items: center; width: 38px; height: 38px;
+                   border-radius: 10px; background: #eef2f8; color: #46557a; flex-shrink: 0;
+                   transition: background .16s var(--ease), color .16s var(--ease); }
+        .qa-icon svg { width: 20px; height: 20px; display: block; }
+        .quick-actions a:hover .qa-icon { background: var(--ink); color: var(--accent); }
+        /* 進出庫是最常按的兩個,給它們自己的語意色 */
+        .qa-in  { background: #e7f5ec; color: var(--green); }
+        .qa-out { background: #fdf0e3; color: #b45309; }
+        .quick-actions a:hover .qa-in  { background: var(--green); color: #fff; }
+        .quick-actions a:hover .qa-out { background: #b45309; color: #fff; }
         .action-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
         .action-links a { display: inline-block; padding: 9px 14px; border: 1px solid #cbd5e1; border-radius: 8px;
                           text-decoration: none; color: #1e293b; font-weight: 600; font-size: 14px; }
@@ -871,6 +951,9 @@ LAYOUT = """
         .action-links a.primary { border-color: #93c5fd; color: #1d4ed8; }
         .auth-box { max-width: 380px; margin: 0 auto; }
         .container:has(.auth-box) { max-width: 440px; margin-top: 9vh; }
+        /* 純表單頁(入出庫、新增商品、匯入…)不需要資料表那麼寬,收窄避免右側大片留白。
+           首頁的搜尋列與歷史頁的篩選列不算,它們所在的頁面要維持寬版 */
+        .container:has(> form:not(.filters):not(.hero-search):not(.inline)) { max-width: 760px; }
         @media (max-width: 760px) {
             .container { margin: 10px; padding: 16px 14px 20px; border-radius: 12px; }
             /* 手機:群組選單展開時改為推開內容(不浮動),仍是零 JS 的 details */
@@ -914,7 +997,12 @@ LAYOUT = """
             table.cards td[data-label="操作"] a.plain { display: inline-block; padding: 8px 12px; }
             .small-btn { min-height: 40px; padding: 8px 14px; font-size: 13px; border-color: #fca5a5; }
             input[type=submit], button { min-height: 44px; }
-            .filters input[type=submit], .hero-search input[type=submit] { min-height: auto; }
+            .filters input[type=submit] { min-height: auto; }
+            /* 手機:搜尋是主要動作,按鈕拉滿版才好按,也不會孤零零貼在左邊 */
+            .hero-search { gap: 8px; }
+            .hero-search .search-field { flex-basis: 100%; }
+            .hero-search select { width: 100%; }
+            .hero-search input[type=submit] { width: 100%; min-height: 46px; }
             /* 直式表單的主要送出鈕滿版好按(篩選列與搜尋列除外) */
             form:not(.filters):not(.hero-search):not(.inline) > input[type=submit] { width: 100%; }
             /* 盤點與收貨的現場輸入:手機上整列堆疊,輸入框與按鈕都放大好按 */
@@ -1050,7 +1138,10 @@ PAGE_INDEX = """
 <div class="banner">⚠ 目前有 {{ low_count }} 項商品低於庫存門檻,<a class="plain" href="{{ url_for('alerts') }}">查看低庫存警示</a></div>
 {% endif %}
 <form method="get" class="hero-search">
-    <input type="text" name="q" placeholder="輸入料號、品名或任一公司的別名料號" value="{{ q }}">
+    <span class="search-field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+        <input type="text" name="q" placeholder="輸入料號、品名、儲位或任一公司的別名料號" value="{{ q }}">
+    </span>
     <select name="category">
         <option value="">全部分類</option>
         {% for c in categories %}
@@ -1064,16 +1155,18 @@ PAGE_INDEX = """
     <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
 </p>
 <div class="quick-actions">
-    <a href="{{ url_for('stock_in') }}"><span class="qa-icon qa-in">⬇</span>入庫登記</a>
-    <a href="{{ url_for('stock_out') }}"><span class="qa-icon qa-out">⬆</span>出庫登記</a>
-    <a href="{{ url_for('image_search') }}"><span class="qa-icon">📷</span>以圖搜圖</a>
-    <a href="{{ url_for('counts_page') }}"><span class="qa-icon">📋</span>循環盤點</a>
+    <a href="{{ url_for('stock_in') }}"><span class="qa-icon qa-in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/></svg></span>入庫登記</a>
+    <a href="{{ url_for('stock_out') }}"><span class="qa-icon qa-out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M4 4h16"/></svg></span>出庫登記</a>
+    <a href="{{ url_for('receipts_page') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18v5H3z"/><path d="M5 12v8h14v-8"/><path d="M12 7v13"/><path d="M12 7 8.5 3.5M12 7l3.5-3.5"/></svg></span>收貨單</a>
+    <a href="{{ url_for('image_search') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.7l1.3-2h6l1.3 2h1.7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg></span>以圖搜圖</a>
+    <a href="{{ url_for('counts_page') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/><rect x="9" y="2.5" width="6" height="3.5" rx="1"/><path d="m8.6 13 1.9 1.9 3.9-3.9"/><path d="M8.6 18h6.8"/></svg></span>循環盤點</a>
     {% if session.get('is_admin') %}
-    <a href="{{ url_for('csv_import') }}"><span class="qa-icon">📄</span>CSV 匯入</a>
+    <a href="{{ url_for('csv_import') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13 3v6h6"/><path d="M12 12v5"/><path d="m9.6 14.6 2.4-2.6 2.4 2.6"/></svg></span>CSV 匯入</a>
     {% endif %}
-    <a href="{{ url_for('product_new') }}"><span class="qa-icon">➕</span>新增商品</a>
+    <a href="{{ url_for('product_new') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v12"/><path d="M6 12h12"/></svg></span>新增商品</a>
 </div>
 {% if products %}
+<div class="table-scroll">
 <table class="cards">
     <tr><th>SKU</th><th>名稱</th><th>儲位</th><th>別名料號</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>供應商</th><th>操作</th></tr>
     {% for p in products %}
@@ -1095,13 +1188,14 @@ PAGE_INDEX = """
             {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('product_delete', pid=p['id']) }}"
                   onsubmit="return confirm('確定刪除商品「{{ p['name'] }}」?');">
-                <button class="small-btn" type="submit">刪除</button>
+                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
             </form>
             {% endif %}
         </td>
     </tr>
     {% endfor %}
 </table>
+</div>
 {{ pager }}
 {% elif q or category %}
 <p>查無商品:找不到符合條件的資料。可以試試改用其他公司的別名料號搜尋,或確認關鍵字是否正確。</p>
@@ -1288,7 +1382,7 @@ PAGE_SUPPLIERS = """
             {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('supplier_delete', sid=s['id']) }}"
                   onsubmit="return confirm('確定刪除供應商「{{ s['name'] }}」?其商品的供應商欄位將被清空。');">
-                <button class="small-btn" type="submit">刪除</button>
+                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
             </form>
             {% endif %}
         </td>
@@ -1451,7 +1545,7 @@ PAGE_PRODUCT_DETAIL = """
             {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('image_delete', pid=p['id'], img_id=img['id']) }}"
                   onsubmit="return confirm('確定刪除這張照片?');">
-                <button class="small-btn" type="submit">刪除</button>
+                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
             </form>
             {% endif %}
         </div>
@@ -1480,7 +1574,7 @@ PAGE_PRODUCT_DETAIL = """
                 {% if session.get('is_admin') %}
                 <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}"
                       onsubmit="return confirm('確定刪除別名「{{ a['company'] }}:{{ a['alias_sku'] }}」?');">
-                    <button class="small-btn" type="submit">刪除</button>
+                    <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
                 </form>
                 {% else %}—{% endif %}
             </td>
@@ -1554,7 +1648,7 @@ PAGE_USERS = """
         <td data-label="操作">
             <form class="inline" method="post" action="{{ url_for('user_delete', uid=u['id']) }}"
                   onsubmit="return confirm('確定刪除帳號「{{ u['username'] }}」?');">
-                <button class="small-btn" type="submit">刪除</button>
+                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
             </form>
         </td>
     </tr>
