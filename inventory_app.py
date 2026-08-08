@@ -13,6 +13,7 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -4028,7 +4029,69 @@ def export_transactions():
 
 init_db()
 
+def cli_setup_admin(username, password):
+    """建立第一個管理員(僅在完全沒有帳號時允許),供安裝腳本免開瀏覽器完成。"""
+    with app.test_request_context():
+        if user_count() > 0:
+            row = get_db().execute("SELECT username FROM users ORDER BY id LIMIT 1").fetchone()
+            print(f"  已有帳號({row['username']}…),略過建立管理員")
+            return True
+        err = check_password_policy(password)
+        if err:
+            print(f"  [錯誤] {err}")
+            return False
+        try:
+            create_user(username, password, True)   # 不回傳值,由呼叫端 commit
+        except sqlite3.IntegrityError:
+            print("  [錯誤] 帳號已存在")
+            return False
+        audit("建立管理員", "帳號", username, "安裝腳本建立第一個管理員")
+        get_db().commit()
+        print(f"  已建立管理員帳號:{username}")
+        return True
+
+
+def cli_import(path):
+    """從命令列匯入商品檔,以第一位管理員名義記錄異動。
+    讓安裝腳本一次跑完轉檔→匯入,使用者不必在瀏覽器裡挑檔案挑類型。"""
+    if not os.path.exists(path):
+        print(f"  [錯誤] 找不到檔案:{path}")
+        return False
+    with app.test_request_context():
+        db = get_db()
+        row = db.execute(
+            "SELECT id, username FROM users WHERE is_admin = 1 ORDER BY id LIMIT 1").fetchone()
+        if row is None:
+            print("  [錯誤] 系統還沒有管理員帳號,無法匯入")
+            return False
+        session["user_id"], session["username"], session["is_admin"] = row["id"], row["username"], 1
+        with open(path, "rb") as fh:
+            rows, err = read_table_file(os.path.basename(path), fh.read())
+        if err:
+            print(f"  [錯誤] {err}")
+            return False
+        ok, report = import_products_rows(rows[1:])   # 略過標題列
+        skipped = len(report) - ok
+        audit("CSV 匯入", "匯入", "products", f"命令列匯入 {os.path.basename(path)},成功 {ok} 筆、跳過 {skipped} 筆")
+        db.commit()
+        print(f"  匯入完成:成功 {ok} 筆,跳過 {skipped} 筆")
+        for r in report:
+            if r["status"] != "成功":
+                print(f"    第 {r['line']} 列 {r['label']}:{r['status']}")
+        return True
+
+
 if __name__ == "__main__":
+    # 安裝腳本用的兩個子命令;都不啟動伺服器,跑完即結束
+    if len(sys.argv) > 1 and sys.argv[1] == "--setup-admin":
+        if len(sys.argv) < 4:
+            sys.exit("用法:python inventory_app.py --setup-admin <帳號> <密碼>")
+        sys.exit(0 if cli_setup_admin(sys.argv[2], sys.argv[3]) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--import":
+        if len(sys.argv) < 3:
+            sys.exit("用法:python inventory_app.py --import <商品匯入檔>")
+        sys.exit(0 if cli_import(sys.argv[2]) else 1)
+
     port = int(os.environ.get("PORT", 5000))
     start_backup_thread()   # 啟動先備份一份,之後每 24 小時自動備份
     print(f"庫存管理系統啟動中…(版本 {APP_VERSION})")
