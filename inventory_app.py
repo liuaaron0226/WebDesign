@@ -11,6 +11,7 @@ import math
 import os
 import secrets
 import shutil
+import socket
 import sqlite3
 import threading
 import time
@@ -437,6 +438,28 @@ def compute_dhash(stream):
 
 def hamming_distance(h1, h2):
     return bin(int(h1, 16) ^ int(h2, 16)).count("1")
+
+
+def local_ip():
+    """取本機在區域網路上的 IP(供同事連線用);取不到回空字串。
+    連 UDP socket 不會真的送出封包,只是讓作業系統選出對外的網卡。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.168.1.1", 1))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        pass
+    try:   # 離線機器上上一段會失敗,退而用主機名稱解析
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+    return ""
 
 
 def now_str():
@@ -4006,10 +4029,19 @@ if __name__ == "__main__":
     print(f"  資料庫:{os.path.abspath(DB_PATH)}")
     print(f"  照片:{IMAGE_DIR}")
     print(f"  備份:{BACKUP_DIR}" + (f"(另同步到 {EXTRA_BACKUP_DIR})" if EXTRA_BACKUP_DIR else ""))
+    # 印「可以直接貼進瀏覽器」的網址。曾經印 http://0.0.0.0:PORT 導致使用者照著
+    # 輸入而得到 ERR_ADDRESS_INVALID —— 0.0.0.0 是「綁定所有網卡」的意思,不是網址。
+    lan = local_ip()
+    print(f"  這台電腦請開:  http://localhost:{port}")
+    if lan:
+        print(f"  同事請開:      http://{lan}:{port}")
+    else:
+        print(f"  同事請開:      http://(本機內網IP):{port}  ← 用 ipconfig 查 IPv4 位址")
+    print(f"  (伺服器綁定 0.0.0.0 代表接受所有網卡連線,這串不是可輸入的網址)")
     try:
         # waitress:正式營運級伺服器(純 Python、Windows 友善),取代開發用伺服器
         from waitress import serve
-        print(f"  服務位址:http://0.0.0.0:{port}(waitress)")
+        print(f"  伺服器:waitress,連接埠 {port}")
         serve(app, host="0.0.0.0", port=port, threads=8)
     except ImportError:
         # 未安裝 waitress 時仍可啟動,確保公司電腦離線安裝失敗也不會卡住
