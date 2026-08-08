@@ -41,9 +41,16 @@ echo    備份   backups\
 echo.
 
 echo [4/4] 啟動中...關閉此視窗即停止服務。
-echo 第一次使用請在本機瀏覽器開 http://localhost:5000 建立管理員帳號。
-echo 若同事連不上,請到「Windows 安全性 - 防火牆」允許 Python 的連入連線(連接埠 5000)。
 echo.
+echo   本機請用這個網址(3 秒後會自動幫你開啟):
+echo       http://localhost:5000
+echo.
+echo   注意:不要輸入 0.0.0.0,那不是網址,瀏覽器會顯示「無法連上這個網站」。
+echo   同事請用上面 [3/4] 列出的 192.168.x.x 或 10.x.x.x 位址加 :5000。
+echo   若同事連不上,請到「Windows 安全性 - 防火牆」允許 Python 連入(連接埠 5000)。
+echo.
+rem 等伺服器起來後自動開啟瀏覽器;失敗也不影響服務,使用者仍可自行輸入上面的網址
+start "" /b cmd /c "timeout /t 3 /nobreak >nul & start http://localhost:5000"
 %PYEXE% inventory_app.py
 if errorlevel 1 goto RUNFAIL
 goto END
