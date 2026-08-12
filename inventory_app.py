@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.08.07"
+APP_VERSION = "2026.08.12"
 
 app = Flask(__name__)
 
@@ -705,58 +705,66 @@ LAYOUT = """
         :root { --ink: #17223b; --ink-2: #1f2e50; --ink-line: #32436b;
                 --accent: #f5a31a; --accent-deep: #e08e00; --accent-ink: #241503;
                 --paper: #e9edf3; --card: #fff; --line: #dde3ec;
-                --text: #1e293b; --mute: #64748b;
-                --blue: #2563eb; --green: #15803d; --red: #b91c1c; --violet: #7c3aed; --teal: #0d9488;
+                --text: #1e293b; --mute: #5f6e85;
+                --blue: #2563eb; --green: #127538; --red: #b91c1c; --violet: #7c3aed; --teal: #0d9488;
                 /* 層次:陰影用藏青而非純黑,陰影才會跟版面同一個色溫 */
                 --sh-1: 0 1px 2px rgba(23,34,59,.06), 0 1px 3px rgba(23,34,59,.05);
                 --sh-2: 0 2px 4px rgba(23,34,59,.06), 0 4px 12px rgba(23,34,59,.08);
                 --sh-3: 0 8px 16px rgba(23,34,59,.10), 0 16px 32px rgba(23,34,59,.10);
                 --sh-accent: 0 1px 2px rgba(146,64,14,.20), 0 2px 8px rgba(245,163,26,.28);
                 --r-sm: 7px; --r-md: 11px; --r-lg: 15px;
-                --ease: cubic-bezier(.2,.7,.3,1); }
+                --ease: cubic-bezier(.2,.7,.3,1);
+                /* 字級階梯:原本 10~27px 之間散落 13 種字級(含 12.5/13.5/16.5 這種沒來由的半像素),
+                   那不是階梯是漂移。收斂成 6 階,一律走代幣,不要再就地寫死 px。
+                   --fs-input 單獨一階是有原因的:iOS Safari 在輸入框字級 <16px 時會自動放大整頁。 */
+                --fs-xs: 12px; --fs-sm: 13px; --fs-base: 15px;
+                --fs-lg: 18px; --fs-xl: 23px; --fs-2xl: 28px;
+                --fs-input: 16px; }
         @media (prefers-reduced-motion: reduce) {
             * { transition: none !important; animation: none !important; }
         }
         * { box-sizing: border-box; }
-        body { margin: 0; background: var(--paper); color: var(--text); font-size: 15px; line-height: 1.55;
-               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
+        body { margin: 0; background: var(--paper); color: var(--text); font-size: var(--fs-base); line-height: 1.55;
+               /* 拿掉 Roboto:設計偵測器把它列為濫用字體,而且對繁體介面毫無作用——
+                  中文字形實際是由 Noto Sans TC / 微軟正黑體決定的,Roboto 只會接到拉丁字母。 */
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
         nav { position: sticky; top: 0; z-index: 10; background: var(--ink); display: flex; align-items: stretch;
               gap: 2px; padding: 0 14px; box-shadow: 0 2px 8px rgba(15,23,42,.3); }
         nav .brand { display: flex; align-items: center; gap: 7px; color: #fff; text-decoration: none;
-                     font-weight: 800; font-size: 15px; letter-spacing: .04em; padding: 12px 10px 12px 0; margin-right: 6px; }
+                     font-weight: 800; font-size: var(--fs-base); letter-spacing: .04em; padding: 12px 10px 12px 0; margin-right: 6px; }
         nav .brand .brand-mark { display: inline-block; width: 12px; height: 12px; background: var(--accent);
                                  border-radius: 3px; box-shadow: 3px -3px 0 0 rgba(245,163,26,.35); }
         nav > a.top, nav summary { display: flex; align-items: center; color: #c3cde0; text-decoration: none;
-              padding: 13px 12px; font-size: 14px; font-weight: 600; border-bottom: 3px solid transparent; cursor: pointer; }
+              padding: 13px 12px; font-size: var(--fs-sm); font-weight: 600; border-bottom: 3px solid transparent; cursor: pointer; }
         nav > a.top:hover, nav summary:hover { color: #fff; }
         nav > a.top.active { color: #fff; border-bottom-color: var(--accent); }
         nav details.menu { position: relative; }
         nav details.menu > summary { list-style: none; gap: 5px; user-select: none; height: 100%; }
         nav details.menu > summary::-webkit-details-marker { display: none; }
-        nav details.menu > summary::after { content: "▾"; font-size: 10px; opacity: .65; }
+        nav details.menu > summary::after { content: "▾"; font-size: var(--fs-xs); opacity: .65; }
         nav details.menu[open] > summary { color: #fff; background: var(--ink-2); }
         nav details.menu.here > summary { color: #fff; border-bottom-color: var(--accent); }
         nav .menu-panel { position: absolute; top: 100%; left: 0; min-width: 172px; background: var(--card);
                           border: 1px solid var(--line); border-radius: 0 10px 10px 10px; padding: 6px;
                           box-shadow: 0 14px 30px rgba(23,34,59,.22); z-index: 20; }
         nav .menu-panel a { display: block; color: var(--text); text-decoration: none; padding: 9px 13px;
-                            border-radius: 7px; font-size: 14px; white-space: nowrap; }
+                            border-radius: 7px; font-size: var(--fs-sm); white-space: nowrap; }
         nav .menu-panel a:hover { background: #f2f6fc; color: var(--blue); }
         nav .menu-panel a.active { background: #fff3d6; color: #92400e; font-weight: 700; }
-        nav .user-info { margin-left: auto; display: flex; align-items: center; color: #8fa0be; font-size: 13px; padding-left: 12px; }
+        nav .user-info { margin-left: auto; display: flex; align-items: center; color: #8fa0be; font-size: var(--fs-sm); padding-left: 12px; }
         nav .user-info a { color: #c3cde0; }
         /* 這是資料表為主的系統,容器給寬一點;表單頁的輸入框本來就自限 420px,不受影響 */
         .container { max-width: 1220px; margin: 24px auto; background: var(--card); padding: 24px 28px 28px;
                      border-radius: var(--r-lg); border: 1px solid var(--line); box-shadow: var(--sh-1); }
         /* 頁標題:琥珀色識別條,每頁自動帶入(大膽識別,不必逐頁改) */
-        h1 { font-size: 23px; font-weight: 800; letter-spacing: -.01em; margin: 0 0 16px; color: #0f172a;
+        h1 { font-size: var(--fs-xl); font-weight: 800; letter-spacing: -.01em; margin: 0 0 16px; color: #0f172a;
              position: relative; padding-left: 15px; }
         h1::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 5px;
                      background: var(--accent); border-radius: 3px; }
-        h2 { font-size: 16px; margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid var(--accent); }
+        h2 { font-size: var(--fs-lg); margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid var(--accent); }
         /* 表格:去掉格線改用橫線分隔,資料才不會被網格切碎;整張表包在圓角卡片裡 */
         table { border-collapse: separate; border-spacing: 0; width: 100%; margin-top: 14px;
-                font-size: 13.5px; border-radius: var(--r-md); overflow: hidden;
+                font-size: var(--fs-sm); border-radius: var(--r-md); overflow: hidden;
                 box-shadow: var(--sh-1); background: var(--card); }
         th, td { border: none; border-bottom: 1px solid var(--line);
                  padding: 9px 12px; text-align: left; vertical-align: middle; }
@@ -764,7 +772,7 @@ LAYOUT = """
         .table-scroll { overflow-x: auto; margin-top: 14px; border-radius: var(--r-md); }
         .table-scroll > table { margin-top: 0; }
         /* 深色表頭:表格是本系統的主角,給它舞台感 */
-        th { background: var(--ink); color: #dbe3f2; font-size: 12.5px; font-weight: 600;
+        th { background: var(--ink); color: #dbe3f2; font-size: var(--fs-xs); font-weight: 600;
              border-color: var(--ink-line); letter-spacing: .04em; word-break: keep-all;
              position: sticky; top: 0; z-index: 2; }
         tr:last-child td { border-bottom: none; }
@@ -784,43 +792,47 @@ LAYOUT = """
         .table-scroll th:last-child { background: var(--ink); z-index: 3; }
         /* 短欄位不換行,列高才穩定;名稱是唯一該吃掉剩餘寬度的欄 */
         td[data-label="SKU"], td[data-label="儲位"], td[data-label="單位"] { white-space: nowrap; }
+        /* 「分類」原本沒設,兩字詞會被欄寬硬切成「管/材」「五/金」直排,難看且拉高整列。
+           只給短欄 nowrap——不要對所有 td 下 overflow-wrap: anywhere,
+           那會連「1000」都拆成「100/0」,比原本的問題更糟。長文字欄(名稱、供應商)
+           維持預設換行,只給下限寬度避免被擠成一字一行。 */
+        td[data-label="分類"] { white-space: nowrap; }
+        td.num, td[id^="qty-"] { white-space: nowrap; }
+        td[data-label="供應商"] { min-width: 132px; }
         td[data-label="名稱"] { min-width: 190px; }
-        td[id^="qty-"] { font-weight: 800; font-size: 16.5px; color: #0f172a; letter-spacing: -.01em; }
+        td[id^="qty-"] { font-weight: 800; font-size: var(--fs-lg); color: #0f172a; letter-spacing: -.01em; }
         th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
         tr.low-stock td, tr.low-stock:hover td { background: #fdf1f1; }
         tr.low-stock td:first-child { box-shadow: inset 3px 0 0 var(--red); }
-        tr.lot-empty td { color: #94a3b8; }
-        .badge-low { display: inline-block; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 700;
+        tr.lot-empty td { color: var(--mute); }
+        .badge-low { display: inline-block; background: #fee2e2; color: #b91c1c; font-size: var(--fs-xs); font-weight: 700;
                      padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
-        .msg { padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 14px; }
+        .msg { padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-size: var(--fs-base); }
         .msg.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-        .msg.ok { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+        .msg.ok { background: #f0fdf4; color: #127538; border: 1px solid #bbf7d0; }
         .banner { background: #fffbeb; border: 1px solid #fde68a; border-left: 5px solid var(--accent);
                   color: #92400e; padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-weight: 600; }
         .banner a { display: inline-block; padding: 4px 0; }
-        .note { color: #64748b; font-size: 13px; }
-        .pager { margin-top: 14px; font-size: 14px; }
+        .note { color: var(--mute); font-size: var(--fs-sm); }
+        .pager { margin-top: 14px; font-size: var(--fs-sm); }
         /* 第五階段:盤點、預留、規劃、標籤 */
-        .loc-cell { font-family: ui-monospace, monospace; font-size: 13px; color: #334155; white-space: nowrap; }
-        .resv-note { font-size: 11px; color: #b45309; font-weight: 600; white-space: nowrap; }
-        .chip-open { background: #fef3c7; color: #92400e; font-size: 12px; font-weight: 700;
+        .loc-cell { font-family: ui-monospace, monospace; font-size: var(--fs-sm); color: #334155; white-space: nowrap; }
+        .resv-note { font-size: var(--fs-xs); color: #ad4f08; font-weight: 600; white-space: nowrap; }
+        .chip-open { background: #fef3c7; color: #92400e; font-size: var(--fs-xs); font-weight: 700;
                      padding: 2px 9px; border-radius: 999px; }
-        .chip-posted { background: #dcfce7; color: #15803d; font-size: 12px; font-weight: 700;
+        .chip-posted { background: #dcfce7; color: #127538; font-size: var(--fs-xs); font-weight: 700;
                        padding: 2px 9px; border-radius: 999px; }
-        .chip-void { background: #e2e8f0; color: #475569; font-size: 12px; font-weight: 700;
+        .chip-void { background: #e2e8f0; color: #475569; font-size: var(--fs-xs); font-weight: 700;
                      padding: 2px 9px; border-radius: 999px; }
         label.chk { display: inline-flex; align-items: center; gap: 4px; margin-top: 0;
-                    font-size: 12px; font-weight: 600; color: var(--mute); white-space: nowrap; }
+                    font-size: var(--fs-xs); font-weight: 600; color: var(--mute); white-space: nowrap; }
         label.chk input { width: auto; margin: 0; }
         tr.has-diff td { background: #fffbeb; }
-        @media (prefers-color-scheme: dark) {
-            .loc-cell { color: #cbd5e1; }
-            .stat-box { background: #1e293b; border-color: #334155; }
-            .stat-num { color: #f1f5f9; }
-            .stat-cap { color: #94a3b8; }
-            tr.has-diff td { background: #292417; }
-            .label, .qr-img { background: #fff; }
-        }
+        /* 這裡原本有一段 @media (prefers-color-scheme: dark),已移除。
+           它只重新著色了 6 個選擇器,但 --paper/--card/--text 這些核心色票從來沒有深色版,
+           所以 OS 設成深色的人看到的是:白底表格上 #cbd5e1 的儲位文字(對比 1.3:1,幾乎看不見)、
+           淺色版面上突兀的深色 KPI 方塊。半套的深色模式比沒有深色模式更糟。
+           要做深色模式請整組色票一起做,而不是補丁式地挑幾個選擇器改。 */
         .stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 18px; }
         /* KPI 色塊:每張卡輪流帶一個識別色的粗頂邊,擺脫整排灰盒 */
         .stat-box { flex: 1 1 130px; background: #f8fafc; border: 1px solid var(--line); border-top: 4px solid var(--blue);
@@ -828,41 +840,41 @@ LAYOUT = """
         .stat-row .stat-box:nth-child(4n+2) { border-top-color: var(--green); }
         .stat-row .stat-box:nth-child(4n+3) { border-top-color: var(--accent); }
         .stat-row .stat-box:nth-child(4n)   { border-top-color: var(--violet); }
-        .stat-num { font-size: 27px; font-weight: 800; font-variant-numeric: tabular-nums;
+        .stat-num { font-size: var(--fs-2xl); font-weight: 800; font-variant-numeric: tabular-nums;
                     letter-spacing: -.02em; color: #0f172a; }
-        .stat-cap { font-size: 12.5px; color: var(--mute); margin-top: 2px; }
+        .stat-cap { font-size: var(--fs-xs); color: var(--mute); margin-top: 2px; }
         .count-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         .count-input { width: 90px !important; margin-top: 0 !important; text-align: right; }
-        .count-note { width: 130px !important; margin-top: 0 !important; font-size: 13px; }
+        .count-note { width: 130px !important; margin-top: 0 !important; font-size: var(--fs-sm); }
         .qr-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 16px 0 4px; }
         .qr-img { width: 120px; height: 120px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
-        .qr-cap { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+        .qr-cap { font-weight: 700; font-size: var(--fs-sm); margin-bottom: 2px; }
         .label-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
         .label { display: flex; gap: 10px; align-items: center; border: 1px solid #cbd5e1;
                  border-radius: 8px; padding: 10px; background: #fff; break-inside: avoid; }
         .label img { width: 84px; height: 84px; flex-shrink: 0; }
         .label-text { min-width: 0; }
-        .label-sku { font-family: ui-monospace, monospace; font-weight: 700; font-size: 14px; }
-        .label-name { font-size: 13px; margin: 1px 0; word-break: break-word; }
-        .label-loc { font-size: 12px; color: #475569; }
+        .label-sku { font-family: ui-monospace, monospace; font-weight: 700; font-size: var(--fs-sm); }
+        .label-name { font-size: var(--fs-sm); margin: 1px 0; word-break: break-word; }
+        .label-loc { font-size: var(--fs-xs); color: #475569; }
         @media print {
             nav, footer, .no-print, .filters, form { display: none !important; }
             .container { box-shadow: none; border: none; margin: 0; padding: 0; max-width: none; }
             body { background: #fff; }
             .label { border-color: #999; }
         }
-        .pager .page-no { color: #64748b; }
+        .pager .page-no { color: var(--mute); }
         form.inline { display: inline; }
-        label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; color: #334155; }
+        label { display: block; margin-top: 12px; font-weight: 600; font-size: var(--fs-sm); color: #334155; }
         input[type=text], input[type=password], input[type=number], input[type=date], select {
-            width: 100%; max-width: 420px; padding: 9px 11px; margin-top: 5px; font-size: 16px;
+            width: 100%; max-width: 420px; padding: 9px 11px; margin-top: 5px; font-size: var(--fs-input);
             border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
         input:focus, select:focus { outline: 2px solid #fcd34d; border-color: var(--accent-deep); }
-        input[type=file] { margin-top: 6px; font-size: 14px; }
+        input[type=file] { margin-top: 6px; font-size: var(--fs-sm); }
         /* 主按鈕:琥珀主色 + 上緣內光與下緣暗邊,讓它看起來是「可以按下去」的實體 */
         input[type=submit], button {
             display: block; padding: 11px 24px; margin-top: 16px;
-            font: inherit; font-size: 15px; font-weight: 700; letter-spacing: .02em;
+            font: inherit; font-size: var(--fs-base); font-weight: 700; letter-spacing: .02em;
             color: var(--accent-ink); border: none; border-radius: var(--r-sm); cursor: pointer;
             background: linear-gradient(180deg, #ffb43a 0%, var(--accent) 55%, var(--accent-deep) 100%);
             box-shadow: var(--sh-accent), inset 0 1px 0 rgba(255,255,255,.45);
@@ -879,7 +891,7 @@ LAYOUT = """
             outline: 3px solid rgba(245,163,26,.55); outline-offset: 2px; }
         /* 次要動作:表格內的小按鈕。預設中性,危險動作才變紅 */
         .small-btn { display: inline-block; padding: 5px 11px; margin: 0;
-                     font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+                     font: inherit; font-size: var(--fs-xs); font-weight: 600; cursor: pointer;
                      color: var(--red); background: var(--card); border: 1px solid var(--line);
                      border-radius: var(--r-sm); box-shadow: none;
                      transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease); }
@@ -895,10 +907,10 @@ LAYOUT = """
         .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 4px; }
         .filters input, .filters select { width: auto; margin-top: 0; }
         .filters input[type=submit] { margin-top: 0; padding: 9px 16px; }
-        footer { text-align: center; color: #94a3b8; padding: 16px; font-size: 12px; }
+        footer { text-align: center; color: var(--mute); padding: 16px; font-size: var(--fs-xs); }
         a.plain { color: #2563eb; text-decoration: none; }
         a.plain:hover { text-decoration: underline; }
-        .alias-cell { font-size: 12px; color: #475569; }
+        .alias-cell { font-size: var(--fs-xs); color: #475569; }
         .photo-wall { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
         .photo-wall .photo-item { text-align: center; }
         .photo-wall img, img.thumb { max-width: 150px; max-height: 150px; border: 1px solid #e2e8f0;
@@ -906,7 +918,7 @@ LAYOUT = """
         .photo-wall .photo-item form { margin-top: 4px; }
         .detail-section { margin-top: 26px; border-top: 1px solid #eef2f6; padding-top: 16px; }
         .import-help { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px 16px;
-                       border-radius: 10px; font-size: 13px; color: #334155; }
+                       border-radius: 10px; font-size: var(--fs-sm); color: #334155; }
         .import-help code { background: #eef2f6; padding: 1px 6px; border-radius: 5px; }
         /* 搜尋是這個系統最常被按的控件,給它最大的視覺份量 */
         .hero-search { display: flex; flex-wrap: wrap; gap: 9px; margin: 4px 0 4px; }
@@ -916,12 +928,12 @@ LAYOUT = """
                                          transition: color .16s var(--ease); }
         .hero-search .search-field:focus-within svg { color: var(--accent-deep); }
         .hero-search input[type=text] { flex: 1 1 auto; max-width: none; margin-top: 0;
-                                        padding: 13px 16px 13px 44px; font-size: 16px;
+                                        padding: 13px 16px 13px 44px; font-size: var(--fs-input);
                                         border-radius: var(--r-md); box-shadow: var(--sh-1); }
         .hero-search select { width: auto; margin-top: 0; border-radius: var(--r-md);
                               padding: 13px 14px; box-shadow: var(--sh-1); }
         .hero-search input[type=submit] { margin-top: 0; padding: 13px 26px; border-radius: var(--r-md); }
-        .sub-links { margin: 0 0 14px; font-size: 13px; color: #94a3b8; }
+        .sub-links { margin: 0 0 14px; font-size: var(--fs-sm); color: var(--mute); }
         /* 快速動作:圖示放在有色圓角方塊裡,滑過時整張卡浮起。
            圖示一律用線條 SVG 而非 emoji——emoji 在不同系統長相不一,也不能跟著配色走 */
         .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
@@ -930,7 +942,7 @@ LAYOUT = """
             display: flex; flex-direction: column; align-items: center; gap: 9px;
             background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
             padding: 15px 8px 13px; text-decoration: none; color: var(--text);
-            font-size: 13.5px; font-weight: 600; box-shadow: var(--sh-1);
+            font-size: var(--fs-sm); font-weight: 600; box-shadow: var(--sh-1);
             transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
         .quick-actions a:hover { transform: translateY(-2px); box-shadow: var(--sh-2); border-color: #c8d2e2; }
         .quick-actions a:active { transform: translateY(0); box-shadow: var(--sh-1); }
@@ -941,12 +953,12 @@ LAYOUT = """
         .quick-actions a:hover .qa-icon { background: var(--ink); color: var(--accent); }
         /* 進出庫是最常按的兩個,給它們自己的語意色 */
         .qa-in  { background: #e7f5ec; color: var(--green); }
-        .qa-out { background: #fdf0e3; color: #b45309; }
+        .qa-out { background: #fdf0e3; color: #ad4f08; }
         .quick-actions a:hover .qa-in  { background: var(--green); color: #fff; }
-        .quick-actions a:hover .qa-out { background: #b45309; color: #fff; }
+        .quick-actions a:hover .qa-out { background: #ad4f08; color: #fff; }
         .action-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
         .action-links a { display: inline-block; padding: 9px 14px; border: 1px solid #cbd5e1; border-radius: 8px;
-                          text-decoration: none; color: #1e293b; font-weight: 600; font-size: 14px; }
+                          text-decoration: none; color: #1e293b; font-weight: 600; font-size: var(--fs-sm); }
         .action-links a:hover { border-color: #93c5fd; background: #eff6ff; }
         .action-links a.primary { border-color: #93c5fd; color: #1d4ed8; }
         .auth-box { max-width: 380px; margin: 0 auto; }
@@ -985,17 +997,17 @@ LAYOUT = """
                              border: none; padding: 7px 0; text-align: right;
                              border-bottom: 1px dashed #eef2f6; }
             table.cards td:last-child { border-bottom: none; }
-            table.cards td::before { content: attr(data-label); font-weight: 600; color: #64748b;
-                                     font-size: 13px; text-align: left; flex-shrink: 0; }
-            table.cards td[data-label="名稱"] { order: -2; font-size: 17px; font-weight: 700;
+            table.cards td::before { content: attr(data-label); font-weight: 600; color: var(--mute);
+                                     font-size: var(--fs-sm); text-align: left; flex-shrink: 0; }
+            table.cards td[data-label="名稱"] { order: -2; font-size: var(--fs-lg); font-weight: 700;
                                                 justify-content: flex-start; text-align: left; }
             table.cards td[data-label="名稱"]::before { content: none; }
             table.cards td[data-label="庫存"], table.cards td[data-label="目前庫存"] { order: -1; }
             table.cards td[data-label="別名料號"], table.cards td[data-label="單價"],
-            table.cards td[data-label="低庫存門檻"] { font-size: 12px; color: #64748b; }
+            table.cards td[data-label="低庫存門檻"] { font-size: var(--fs-xs); color: var(--mute); }
             /* 觸控目標:操作連結與刪除鈕加大 */
             table.cards td[data-label="操作"] a.plain { display: inline-block; padding: 8px 12px; }
-            .small-btn { min-height: 40px; padding: 8px 14px; font-size: 13px; border-color: #fca5a5; }
+            .small-btn { min-height: 40px; padding: 8px 14px; font-size: var(--fs-sm); border-color: #fca5a5; }
             input[type=submit], button { min-height: 44px; }
             .filters input[type=submit] { min-height: auto; }
             /* 手機:搜尋是主要動作,按鈕拉滿版才好按,也不會孤零零貼在左邊 */
@@ -1492,7 +1504,7 @@ PAGE_REPORT = """
             <div class="stat-cap">最近一次盤點的相符比例</div>
         </div>
         <div class="stat-box">
-            <div class="stat-num" style="font-size:16px">{{ accuracy_info['name'] }}</div>
+            <div class="stat-num" style="font-size:var(--fs-lg)">{{ accuracy_info['name'] }}</div>
             <div class="stat-cap">過帳於 {{ accuracy_info['posted_local'] }}</div>
         </div>
     </div>

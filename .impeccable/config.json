@@ -1,0 +1,10 @@
+{
+  "_comment": "Impeccable 專案設定。掃描對象是 tools/extract_ui.py 產生的 ui_snapshot/,不是原始碼——偵測器不認得 .py。詳見 .claude/skills/impeccable/VENDORED.md。",
+  "mode": "operate",
+  "_mode_note": "Operate:使用者是來完成任務的。可掃視性、一致性、現場真實使用情境優先於表現力。不是 Persuade(行銷頁)。",
+  "detector": {
+    "designSystem": { "enabled": true },
+    "ignoreRules": [],
+    "_ignoreRules_note": "刻意保持空陣列。已審視並決定保留的規則(目前是 flat-type-hierarchy)由 tools/design_check.py 分類顯示並列出理由,而不是在這裡靜音。理由:靜音會讓下一個人以為那條沒問題,而不是『看過了,決定這樣』。"
+  }
+}

@@ -16,6 +16,12 @@ pip install -r requirements.txt   # Flask 3.1, Pillow (image search), waitress (
 python patrick_method_solver.py   # solver app: 0.0.0.0, port from $PORT (default 5000)
 python inventory_app.py           # inventory app: 0.0.0.0, port from $PORT (default 5000, served by waitress)
 python test_inventory.py          # inventory app test suite (stdlib unittest; must be green before /verify)
+
+# 設計檢查(任何介面改動都要跑;需要 Node 22+ 以執行 npx)
+python tools/design_check.py      # 抽取 20 個實際頁面 -> Impeccable 偵測器 -> 分類報告
+python tools/design_check.py --shots   # 同上,並截圖到 shots/current/
+python tools/extract_ui.py        # 只做抽取(輸出 ui_snapshot/,已 gitignore)
+python tools/shoot_ui.py --out shots/x # 只做截圖(桌面 1280px + 手機 390px)
 ```
 
 The solver app has no automated tests; `test_inventory.py` covers the inventory app. Both apps are deployed to Render (each as its own service with its own start command), which supplies the `PORT` environment variable — keep the `0.0.0.0` host binding intact.
@@ -36,7 +42,8 @@ Note: `requirements.txt` is UTF-16 encoded (saved on Windows). `pip` handles it,
 一次到位是不可預期的,尤其是視覺設計。以下規則強制「持續更新」:
 
 - **側寫是活文件**:session 中觀察到使用者新的用詞習慣、被糾正的解讀、或新偏好(含美術偏好)時,應主動提議更新本檔的側寫章節(走 PR、由使用者確認),不等使用者要求。
-- **設計/UI 任務的截圖迭代義務**:凡涉及介面外觀的修改,必須跑截圖迭代循環——修改 → 以 Playwright(Chromium 位於 `/opt/pw-browsers/chromium`,勿執行 `playwright install`)截取桌面(1280px)與手機(390px)寬度截圖 → 自我審視(排版、對比、擁擠度、RWD、中文字體)→ 再修,內部至少 2 輪。
+- **設計/UI 任務的截圖迭代義務**:凡涉及介面外觀的修改,必須跑截圖迭代循環——修改 → 以 Playwright(Chromium 實際路徑是 `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`,pip 版 playwright 預期的版本號不同,一律用 `executable_path` 明確指定,**勿執行 `playwright install`**;`tools/shoot_ui.py` 已封裝)截取桌面(1280px)與手機(390px)寬度截圖 → 自我審視(排版、對比、擁擠度、RWD、中文字體)→ 再修,內部至少 2 輪。
+- **設計檢查的機器閘門**:改完介面跑 `python tools/design_check.py`(抽取 20 個實際頁面 → Impeccable 偵測器 → 分類報告)。詳見下方「設計工具鏈」。
 - **成品必須讓使用者看得到**:設計類任務的最終回報必須附上截圖(SendUserFile),由使用者做最終美術裁決;「程式碼寫完了」不等於「設計完成了」。
 - **使用者的視覺回饋落地**:使用者對外觀的任何評語(太擠、顏色不對、字太小…)由 Claude 代寫成 REQUIREMENTS.md「介面與美術」節的可驗證條目,成為下一輪迭代的驗收標準。
 
@@ -97,6 +104,14 @@ Constraints baked into the code: 4 variables max, minterm indices derived from t
 **回報格式**:先講結果再講細節;完成宣稱必須附逐項證據表(見 Verification workflow);過程要可追溯(分支、commit hash)——使用者會在數輪後回頭追問「上次執行了什麼」。
 
 **設計是預設值,不是選配**(2026-08 使用者糾正):使用者說「所有設計都很陽春,按鈕的部分也是,明明之前都有儲存很多不錯的設計為何都不會主動使用,都還要我特別說明」。**任何動到介面的修改都算設計任務**,必須自己跑截圖迭代並附圖,不等使用者交代。REQUIREMENTS 的視覺條目是及格線不是目標——打勾不代表好看。具體禁區:不用 emoji 當功能圖示(一律內嵌線條 SVG)、按鈕要有 hover/active/focus-visible 三態與實體感、陰影要色票化且帶版面色溫、資料表列高不可被操作欄撐爆。
+
+**設計工具鏈:Impeccable(2026-08 導入)**。使用者提供了一份 Notion 文件介紹 Taste Skill 與 Impeccable,決定採用 Impeccable 原版,vendored 於 `.claude/skills/impeccable/`(上游 `pbakaus/impeccable`,釘住 commit `251135e`,Apache-2.0;來源與取捨見同目錄 `VENDORED.md`)。可用 `/impeccable audit`、`/impeccable critique`、`/impeccable polish`、`/impeccable typeset` 等 23 個指令(注意是 `/impeccable <cmd>`,不是 `/audit`)。設計基準寫在根目錄 `PRODUCT.md`(產品真實:零 JS、不可外連、Operate 模式)與 `DESIGN.md`(色票、字級代幣、版面、Do's and Don'ts)——**改介面前先讀 DESIGN.md**。
+
+三個關於本專案的關鍵事實,不知道就會白做工:
+
+1. **偵測器不認得 `.py`。** 它的 `SCANNABLE_EXTENSIONS` 只有 `.html/.css/.jsx/.tsx/...`,而本專案的 UI 全在 `inventory_app.py` 的 `LAYOUT` 字串裡。直接對 repo 掃描會得到「0 個檔案、0 個問題」,看起來全過、其實沒檢查。所以要先跑 `tools/extract_ui.py` 用 Flask test client 把 20 個實際頁面算繪成獨立 HTML。**看到偵測結果先確認掃描檔數不是 0。**
+2. **上游的 hook 沒有啟用,是刻意的。** 實測:對 `.py` 完全靜默;對 `.html` 因為缺 npm 相依而退化成 regex,自己警告「undercount, not a clean bill of health」卻印出「No issues found」——會製造假通過。改用 `python tools/design_check.py`(走 `npx impeccable@3.5.0`,套件自帶相依,完整非退化)。
+3. **規則與使用者品味衝突時,以使用者為準。** Impeccable 自己的 SKILL.md 就寫「The brief wins」。已審視後決定保留的規則要寫進 `tools/design_check.py` 的 `ACCEPTED` 並附理由,**不要在 `.impeccable/config.json` 靜音**——靜音會讓下一個人以為那條沒問題,而不是「看過了,決定這樣」。
 
 **美術偏好**(2026-08 使用者實證回饋):功能入口要「精簡」——相關功能整合成群組,不要一長排並列(庫存 app 導覽已分為 總覽/庫存作業/商品資料/分析報表/系統管理 五項,零 JS 的 details 選單);視覺要「大膽」,忌死板——現行識別:深藏青 + 琥珀主色(CSS 變數 `--ink`/`--accent`)、深色表頭、KPI 色塊。介面改動一律跑截圖迭代並附圖裁決。
 

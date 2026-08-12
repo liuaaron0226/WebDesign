@@ -67,6 +67,29 @@
   - 驗證:Playwright 390px 寬檢查 `document.documentElement.scrollWidth <= 390`。
 - [ ] **截圖迭代至少 2 輪**:桌面與手機截圖自我審視後再修,最終截圖以 SendUserFile 附上,由使用者做最終美術裁決。
 
+## 介面與美術(inventory_app.py)——設計偵測基準(Impeccable)
+
+> 來源:使用者提供的 Notion 頁面「AI Coding Tools — Taste Skill / Impeccable」(2026-08)。該文件列出六個檢查維度:視覺層級、色彩對比、手機 RWD、無障礙、間距一致性、CTA 辨識度。本節把它落成可機器判定的條目。
+> **驗證前提**:偵測器不認得 `.py`,UI 又全寫在 `inventory_app.py` 的字串裡,所以必須先跑抽取。**掃到 0 個檔案不是「全部通過」,是「根本沒檢查」。**
+
+- [ ] **抽取層確實產出頁面**:`python tools/extract_ui.py` 產生 ≥ 20 個 `.html`,每個都含 `<html` 與 `<style`。
+  - 驗證:`python tools/extract_ui.py` 輸出「共 N 個頁面」且 N ≥ 20;`ls ui_snapshot/*.html | wc -l` ≥ 20。
+- [ ] **偵測器確實掃到我們的畫面(非 0 檔案)**:`python tools/design_check.py` 報告的「掃描 N 個頁面」N ≥ 20。
+  - 驗證:`python tools/design_check.py` 輸出含「掃描 20 個頁面」;若出現 `DEGRADED` 字樣則本項不通過(退化模式的結果是低估值,不可當通過)。
+- [ ] **文字對比全數達 WCAG AA**:`low-contrast` 命中數為 0,且驗算需含 hover 態底色(`#eef4fd`),不能只算白底。
+  - 驗證:`python tools/design_check.py --json /tmp/d.json` 後 `python3 -c "import json;print(sum(1 for x in json.load(open('/tmp/d.json')) if x['antipattern']=='low-contrast'))"` 為 `0`。
+- [ ] **不使用被列為濫用的字體**:`overused-font` 命中數為 0(系統字體堆疊,不載外部字體)。
+  - 驗證:同上,`antipattern=='overused-font'` 計數為 `0`;外部字體/CDN 由 `design_check.py` 的結構檢查把關(見下方說明,勿用 naive grep)。
+- [ ] **不得有半套深色模式**:`dark-glow` 命中數為 0;若要做深色模式,`--paper`/`--card`/`--text` 必須一起有深色版。
+  - 驗證:`antipattern=='dark-glow'` 計數為 `0`;且 `design_check.py` 的結構檢查「無半套深色模式」為 ✅。
+- [ ] **字級走代幣、不就地寫死**:`<style>` 區塊內沒有任何 `font-size: <數字>px`,一律用 `var(--fs-*)`。
+- [ ] **中文詞不從詞中間斷行、數字不被拆開**:短欄(分類/單位/SKU/儲位)與數字欄 `nowrap`;全域 `td` 不得設 `overflow-wrap: anywhere`(會把「1000」拆成「100/0」)。
+  - 上面兩項與「不得有半套深色模式」「不載外部字體」的驗證,一律看 `python tools/design_check.py` 的「原始碼結構檢查」段落,五項需全為 ✅。
+  - **不要用 naive grep 驗證這幾項。** 本專案的 CSS 註解會把「不要這樣寫」的反例原文寫出來(例如註解裡就有 `overflow-wrap: anywhere` 和 `prefers-color-scheme` 兩個字串),直接 grep 整個檔案會把註解當成實際宣告,產生假失敗。`design_check.py` 的 `app_css()` 會先剝掉 CSS 註解再檢查。
+  - 另需以 1280px 截圖人工確認「管材/五金/耗材」與「1000」皆為單行。
+- [ ] **已審視保留的規則必須寫得出理由**:任何未歸零的規則都要列在 `tools/design_check.py` 的 `ACCEPTED` 並附理由,不可只是靜音。
+  - 驗證:`python tools/design_check.py` 的「待處理」清單中,每一條都能在本節或 `DESIGN.md` 找到對應決策;`.impeccable/config.json` 的 `detector.ignoreRules` 維持空陣列。
+
 ## 庫存管理系統(inventory_app.py)驗收
 
 > 測試前置:先清掉測試資料庫再啟動,session 測試需 cookie jar。**本節條目有順序相依(註冊→登入→建供應商→建商品→入出庫→報表),必須依序執行**;每輪驗收都要先 `rm -f /tmp/verify_inventory.db` 取得乾淨 DB,否則「重複帳號」「首位管理員」等項會誤判。
