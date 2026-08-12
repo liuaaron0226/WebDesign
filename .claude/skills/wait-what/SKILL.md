@@ -1,12 +1,7 @@
 ---
 name: wait-what
-description: 剛剛那段我沒聽懂,重講一次。用在訊息看不懂、術語太多、或不知道自己現在該做什麼的時候。
+description: Stop. That last message did not land — re-pitch it.
 disable-model-invocation: true
 ---
 
-等一下,我跟不上你剛剛講到哪了。重講一次:
-
-- 先補我缺的背景(我不知道你為什麼要做這件事)。
-- 用繁體中文、白話短句,一句只講一件事。
-- 專有名詞改用 `CLAUDE.md` 裡已經講好的說法(PR = 簽核單、main = 正式菜單、merge = 簽核通過、minterm/SOP/PI 維持原詞不用譬喻)。
-- 最後告訴我:我現在要做的那「一件事」是什麼。
+Wait — I don't understand where you've got to here. Re-pitch that: give me a little bit of context, talk in ASD-STE100 Simplified Technical English, and use the ubiquitous language from `CONTEXT.md`.

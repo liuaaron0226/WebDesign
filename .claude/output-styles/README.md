@@ -39,8 +39,4 @@ Output style 會**取代**Claude Code 原本的系統提示。原版 `eli5.md` �
 - `eli5.md`:照你給的截圖逐字轉錄,一個字沒改(含 `keep-coding-instructions: true`)。
 - `wait-what`:來自 [mattpocock/skills](https://github.com/mattpocock/skills)(MIT License)。**該 repo 裡沒有 output style**,它是 skill 集合;`/wait-what` 是裡面唯一跟 ELI5 同一個目的的東西,所以我把它當成你說的「第二個」整理進來。原版要求引用 `CONTEXT.md` 的統一用語,本專案沒有這個檔,已改指向 `CLAUDE.md`,並加上繁中規則。
 
-如果你要的是整包 Matt Pocock 的 skills(`/grill-me` 逼問需求、`/tdd`、`/handoff` 交接文件…共約 30 支),那是另一件事,跟我說:
-
-```
-幫我把 mattpocock/skills 整包裝進專案
-```
+整包 Matt Pocock 的 skills(`/grill-me` 逼問需求、`/tdd`、`/handoff` 交接文件…共 35 支)**已經裝好了**,清單與注意事項見 [`.claude/skills/README.md`](../skills/README.md)。
