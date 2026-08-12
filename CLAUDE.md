@@ -109,3 +109,23 @@ Constraints baked into the code: 4 variables max, minterm indices derived from t
 **優先序**:要求確實達成 > 實測證據 > 省使用者時間 > 誠實透明 > 省用量。絕不因省用量或省輪次而壓縮品質或提早收尾——使用者明確表示寧可多耗用量。
 
 **期望管理**:使用者預期 Claude 有跨視窗的連續記憶。新 session 應主動說明「對你的理解來自本檔案的側寫」,不假裝記得未記錄的事;如需更深入的長期理解,請使用者匯出過往對話上傳後再分析。
+
+## Agent skills
+
+本 repo 安裝了 [mattpocock/skills](https://github.com/mattpocock/skills) 的 engineering / productivity 系列(共 26 支,清單見 `.claude/skills/README.md`),下列設定供這些 skill 讀取。
+
+### Issue tracker
+
+Issue 與 spec 放在 GitHub Issues(`liuaaron0226/patrick_webapp`);雲端 session 沒有 `gh` CLI,改用 GitHub MCP 工具。見 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+採用五個標準角色的預設標籤字串(`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`)。見 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+單一 context:根目錄一份 `CONTEXT.md` 定義統一語彙,ADR 放 `docs/adr/`。`CONTEXT.md` 只講「是什麼」,本檔講「怎麼做、為什麼」。見 `docs/agents/domain.md`。
+
+### 輸出風格
+
+`.claude/output-styles/` 另有 ELI5 風格(`/output-style eli5-zh` 切換),說明見該目錄的 README。
