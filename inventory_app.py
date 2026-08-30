@@ -326,7 +326,44 @@ def init_db():
             checked_at   TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_ritems_receipt ON receipt_items(receipt_id);
+        -- 採購訂單:已下訂 → 已出貨 → 已到貨待驗 → 已入庫(結案)。
+        -- 訂了但還沒入庫的量叫「在途」,它讓人在下單前看得到「其實已經在路上了」
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            po_no         TEXT DEFAULT '',
+            supplier_id   INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+            supplier_name TEXT DEFAULT '',
+            status        TEXT NOT NULL DEFAULT 'ordered'
+                          CHECK (status IN ('ordered','shipped','arrived','closed','cancelled')),
+            eta           TEXT DEFAULT '',
+            shipped_at    TEXT DEFAULT '',
+            tracking_no   TEXT DEFAULT '',
+            arrived_at    TEXT DEFAULT '',
+            closed_at     TEXT DEFAULT '',
+            note          TEXT DEFAULT '',
+            username      TEXT DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS purchase_order_items (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            po_id        INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            line_no      INTEGER NOT NULL DEFAULT 0,
+            raw_sku      TEXT DEFAULT '',
+            raw_name     TEXT DEFAULT '',
+            product_id   INTEGER REFERENCES products(id) ON DELETE SET NULL,
+            match_type   TEXT DEFAULT 'none',
+            match_note   TEXT DEFAULT '',
+            ordered_qty  INTEGER NOT NULL DEFAULT 0,
+            received_qty INTEGER NOT NULL DEFAULT 0,
+            unit_cost    REAL,
+            eta          TEXT DEFAULT '',
+            note         TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_poitems_po ON purchase_order_items(po_id);
+        CREATE INDEX IF NOT EXISTS idx_poitems_product ON purchase_order_items(product_id);
     """)
+    # 收貨單回指採購單:到貨時自動生成的收貨單要知道自己來自哪一張訂單
+    ensure_column(conn, "receipts", "po_id", "INTEGER")
     # 既有資料庫的欄位擴充(SQLite 的 ADD COLUMN 重複執行會報錯,故先檢查)
     ensure_column(conn, "products", "location", "TEXT DEFAULT ''")
     ensure_column(conn, "products", "purchase_unit", "TEXT DEFAULT ''")
@@ -584,6 +621,42 @@ def xyz_class(stats):
 # 預留:可用量 = 現貨 − 有效預留(業界的 on-hand vs available 區分)
 # ---------------------------------------------------------------------------
 
+                                                                        # noqa: E302
+# 在途:已下訂但尚未入庫的量。只算還活著的訂單(結案與作廢都不算)
+ONORDER_STATUSES = ("ordered", "shipped", "arrived")
+
+
+def onorder_map():
+    """回傳 {product_id: 在途數量};在途 = Σ(訂購量 − 已收量),負數視為 0。"""
+    rows = get_db().execute(f"""
+        SELECT i.product_id AS pid,
+               SUM(CASE WHEN i.ordered_qty > i.received_qty
+                        THEN i.ordered_qty - i.received_qty ELSE 0 END) AS qty
+        FROM purchase_order_items i
+        JOIN purchase_orders o ON i.po_id = o.id
+        WHERE i.product_id IS NOT NULL
+          AND o.status IN ({','.join('?' * len(ONORDER_STATUSES))})
+        GROUP BY i.product_id
+    """, ONORDER_STATUSES).fetchall()
+    return {r["pid"]: r["qty"] or 0 for r in rows}
+
+
+def po_status_summary():
+    """首頁用的採購狀態總覽:每個階段有幾張單、幾個品項、多少在途量。"""
+    out = {}
+    for st in ONORDER_STATUSES:
+        r = get_db().execute("""
+            SELECT COUNT(DISTINCT o.id) AS orders,
+                   COUNT(i.id) AS items,
+                   COALESCE(SUM(CASE WHEN i.ordered_qty > i.received_qty
+                                     THEN i.ordered_qty - i.received_qty ELSE 0 END), 0) AS qty
+            FROM purchase_orders o LEFT JOIN purchase_order_items i ON i.po_id = o.id
+            WHERE o.status = ?
+        """, (st,)).fetchone()
+        out[st] = {"orders": r["orders"] or 0, "items": r["items"] or 0, "qty": r["qty"] or 0}
+    return out
+
+
 def reserved_map():
     return {r["product_id"]: r["qty"] for r in get_db().execute("""
         SELECT product_id, SUM(quantity) AS qty FROM reservations
@@ -809,6 +882,59 @@ LAYOUT = """
                        padding: 2px 9px; border-radius: 999px; }
         .chip-void { background: #e2e8f0; color: #475569; font-size: 12px; font-weight: 700;
                      padding: 2px 9px; border-radius: 999px; }
+        /* 採購狀態:每個階段一個顏色,列表與流程圖共用同一組語意 */
+        .chip-po { display: inline-block; font-size: 12px; font-weight: 700;
+                   padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+        .chip-ordered   { background: #e8eefb; color: #1d4ed8; }
+        .chip-shipped   { background: #e6f2fb; color: #0369a1; }
+        .chip-arrived   { background: #fdf0e3; color: #b45309; }
+        .chip-closed    { background: #e7f5ec; color: var(--green); }
+        .chip-cancelled { background: #e2e8f0; color: #475569; }
+        /* 採購三階段的入口卡:數字大、可點,直接帶到該狀態的清單 */
+        .po-flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                   gap: 12px; margin: 16px 0 8px; }
+        .po-step { display: flex; flex-direction: column; gap: 3px; text-decoration: none;
+                   background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--blue);
+                   border-radius: var(--r-md); padding: 14px 16px; color: var(--text);
+                   box-shadow: var(--sh-1);
+                   transition: transform .16s var(--ease), box-shadow .16s var(--ease); }
+        .po-step:hover { transform: translateY(-2px); box-shadow: var(--sh-2); }
+        .po-step.po-shipped { border-top-color: #0369a1; }
+        .po-step.po-arrived { border-top-color: #b45309; }
+        .po-step-label { font-size: 12.5px; font-weight: 700; color: var(--mute); letter-spacing: .04em; }
+        .po-step-n { font-size: 27px; font-weight: 800; letter-spacing: -.02em;
+                     font-variant-numeric: tabular-nums; line-height: 1.15; }
+        .po-step-n small { font-size: 13px; font-weight: 600; color: var(--mute); margin-left: 2px; }
+        .po-step-sub { font-size: 12.5px; color: var(--mute); }
+        /* 單張訂單的流程軌:走到哪一步一目了然 */
+        .po-track { display: flex; align-items: center; gap: 0; margin: 18px 0 6px; flex-wrap: wrap; }
+        .po-node { display: flex; align-items: center; gap: 7px; flex: 1 1 auto; min-width: 108px; position: relative; }
+        .po-node + .po-node::before { content: ""; flex: 1 1 auto; height: 2px; background: var(--line); margin-right: 7px; }
+        .po-node.done + .po-node.done::before, .po-node.now::before { background: var(--accent); }
+        .po-dot { width: 13px; height: 13px; border-radius: 50%; background: var(--line);
+                  border: 2px solid var(--card); box-shadow: 0 0 0 2px var(--line); flex-shrink: 0; }
+        .po-node.done .po-dot { background: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+        .po-node.now .po-dot { box-shadow: 0 0 0 4px rgba(245,163,26,.35); }
+        .po-node-label { font-size: 13px; color: var(--mute); white-space: nowrap; }
+        .po-node.done .po-node-label { color: var(--text); font-weight: 600; }
+        /* 狀態篩選膠囊 */
+        .chip-link { display: inline-block; padding: 5px 13px; border-radius: 999px;
+                     border: 1px solid var(--line); background: var(--card); color: var(--text);
+                     text-decoration: none; font-size: 13px; font-weight: 600;
+                     transition: border-color .15s var(--ease), background .15s var(--ease); }
+        .chip-link:hover { border-color: var(--accent); background: #fff8ea; }
+        .chip-link.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+        .onorder-cell { color: #b45309; font-weight: 700; }
+        /* 首頁的採購帶要壓縮:主角是下方的庫存表,別把它推到看不見 */
+        .po-home { margin-top: 18px; padding-top: 12px; }
+        .po-home h2 { font-size: 14px; margin-bottom: 8px; }
+        .po-home .po-flow { margin: 0; gap: 10px; }
+        .po-home .po-step { flex-direction: row; align-items: baseline; gap: 8px;
+                            padding: 9px 14px; border-top-width: 3px; }
+        .po-home .po-step-label { font-size: 13px; color: var(--text); }
+        .po-home .po-step-n { font-size: 20px; }
+        .po-home .po-step-n small { font-size: 11.5px; }
+        .po-home .po-step-sub { font-size: 12px; margin-left: auto; text-align: right; }
         label.chk { display: inline-flex; align-items: center; gap: 4px; margin-top: 0;
                     font-size: 12px; font-weight: 600; color: var(--mute); white-space: nowrap; }
         label.chk input { width: auto; margin: 0; }
@@ -1027,9 +1153,10 @@ LAYOUT = """
         <a class="brand" href="{{ url_for('index') }}"><span class="brand-mark"></span>庫存管理</a>
         <a class="top{% if request.path == '/' %} active{% endif %}" href="{{ url_for('index') }}">庫存總覽</a>
         {% set navp = request.path %}
-        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/alerts') or navp.startswith('/counts') or navp.startswith('/reservations') or navp.startswith('/receipts') %} here{% endif %}">
+        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/alerts') or navp.startswith('/counts') or navp.startswith('/reservations') or navp.startswith('/receipts') or navp.startswith('/orders') %} here{% endif %}">
             <summary>庫存作業</summary>
             <div class="menu-panel">
+                <a {% if navp.startswith('/orders') %}class="active" {% endif %}href="{{ url_for('orders_page') }}">採購單</a>
                 <a {% if navp.startswith('/receipts') %}class="active" {% endif %}href="{{ url_for('receipts_page') }}">收貨單</a>
                 <a {% if navp == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫</a>
                 <a {% if navp == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫</a>
@@ -1165,10 +1292,24 @@ PAGE_INDEX = """
     {% endif %}
     <a href="{{ url_for('product_new') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v12"/><path d="M6 12h12"/></svg></span>新增商品</a>
 </div>
+{% if po_summary_total %}
+<div class="detail-section po-home">
+    <h2>採購在途</h2>
+    <div class="po-flow">
+        {% for st in ['ordered','shipped','arrived'] %}
+        <a class="po-step po-{{ st }}" href="{{ url_for('orders_page', status=st) }}">
+            <span class="po-step-label">{{ po_labels[st] }}</span>
+            <span class="po-step-n">{{ po_summary[st]['orders'] }}<small> 張單</small></span>
+            <span class="po-step-sub">{{ po_summary[st]['items'] }} 品項・在途 {{ po_summary[st]['qty'] }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
 {% if products %}
 <div class="table-scroll">
 <table class="cards">
-    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th>別名料號</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>供應商</th><th>操作</th></tr>
+    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th>別名料號</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th class="num">在途</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>供應商</th><th>操作</th></tr>
     {% for p in products %}
     <tr{% if p['low_stock_threshold'] > 0 and p['available'] <= p['low_stock_threshold'] %} class="low-stock"{% endif %}>
         <td data-label="SKU">{{ p['sku'] }}</td>
@@ -1178,6 +1319,7 @@ PAGE_INDEX = """
         <td data-label="分類">{{ p['category'] }}</td>
         <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
         <td data-label="可用" class="num" id="avail-{{ p['id'] }}">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
+        <td data-label="在途" class="num">{% if p['onorder'] %}<span class="onorder-cell">{{ p['onorder'] }}</span>{% else %}—{% endif %}</td>
         <td data-label="單位">{{ p['unit'] }}</td>
         <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
         <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
@@ -1561,6 +1703,29 @@ PAGE_PRODUCT_DETAIL = """
 </div>
 
 <div class="detail-section">
+    <h2>在途採購</h2>
+    {% if open_pos %}
+    <p class="note">這項料目前還有 <strong>{{ onorder_total }}</strong> 在路上。下單前先看這裡,避免重複採購。</p>
+    <table class="cards">
+        <tr><th>採購單</th><th>狀態</th><th>預計到貨</th><th class="num">訂購</th><th class="num">已收</th><th class="num">在途</th><th>操作</th></tr>
+        {% for o in open_pos %}
+        <tr>
+            <td data-label="採購單">{{ o['po_no'] or '(未填單號)' }}</td>
+            <td data-label="狀態"><span class="chip-po chip-{{ o['status'] }}">{{ o['status_label'] }}</span></td>
+            <td data-label="預計到貨">{{ o['eta'] or '—' }}</td>
+            <td data-label="訂購" class="num">{{ o['ordered_qty'] }}</td>
+            <td data-label="已收" class="num">{{ o['received_qty'] }}</td>
+            <td data-label="在途" class="num"><span class="onorder-cell">{{ o['onorder'] }}</span></td>
+            <td data-label="操作"><a class="plain" href="{{ url_for('order_detail', oid=o['id']) }}">開啟</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="note">目前沒有這項料的在途採購單。</p>
+    {% endif %}
+</div>
+
+<div class="detail-section">
     <h2>跨公司料號對照</h2>
     {% if aliases %}
     <table>
@@ -1811,6 +1976,206 @@ PAGE_COUNT_DETAIL = """
     <form method="post" action="{{ url_for('count_post', cid=c['id']) }}"
           onsubmit="return confirm('確定過帳?將依實盤數修正 {{ diff_count }} 項商品的庫存,且不可復原。');">
         <input type="submit" value="過帳並修正庫存">
+    </form>
+</div>
+{% endif %}
+"""
+
+PO_STATUS_LABEL = {"ordered": "已下訂", "shipped": "已出貨", "arrived": "已到貨待驗",
+                   "closed": "已入庫結案", "cancelled": "已作廢"}
+
+PAGE_ORDERS = """
+<h1>採購訂單</h1>
+<p class="note">
+    訂單只登記一次,後面每個階段自動往下帶:<strong>下訂 → 出貨 → 到貨 → 檢查 → 入庫</strong>。
+    標記到貨時系統直接把明細變成收貨單,現場只要核對數量,不必重打料號。
+    下訂到入庫之間的量叫「在途」,它讓你在下單前先看到「其實已經在路上了」。
+</p>
+
+<div class="po-flow">
+    {% for st in ['ordered','shipped','arrived'] %}
+    <a class="po-step po-{{ st }}" href="{{ url_for('orders_page', status=st) }}">
+        <span class="po-step-label">{{ labels[st] }}</span>
+        <span class="po-step-n">{{ summary[st]['orders'] }}<small> 張單</small></span>
+        <span class="po-step-sub">{{ summary[st]['items'] }} 品項・在途 {{ summary[st]['qty'] }}</span>
+    </a>
+    {% endfor %}
+</div>
+
+<div class="detail-section">
+    <h2>上傳採購明細建立訂單</h2>
+    <div class="import-help">
+        <p>欄位順序(第一列為標題列,會被略過):<br>
+        <code>料號,品名,數量,單價,預計到貨日,備註</code><br>
+        料號可以是<strong>我方料號,也可以是供應商自己的料號</strong>——系統會透過跨公司料號對照自動找到我方商品。</p>
+        <p><a class="plain" href="{{ url_for('order_template') }}">下載空白範例檔</a></p>
+    </div>
+    <form method="post" action="{{ url_for('order_upload') }}" enctype="multipart/form-data">
+        <label>採購單號(選填)</label>
+        <input type="text" name="po_no" placeholder="例:PO-20260808-01">
+        <label>供應商</label>
+        <select name="supplier_id">
+            <option value="">(未指定)</option>
+            {% for s in suppliers %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}
+        </select>
+        <label>預計到貨日(選填)</label><input type="date" name="eta">
+        <label>明細檔案</label>
+        <input type="file" name="file" accept=".csv,.xlsx,.xlsm,.tsv,.txt,text/csv">
+        <label>備註(選填)</label><input type="text" name="note">
+        <input type="submit" value="建立採購單">
+    </form>
+</div>
+
+<div class="detail-section">
+    <h2>訂單列表{% if status_filter %}:{{ labels.get(status_filter, status_filter) }}{% endif %}</h2>
+    <p class="filters">
+        <a class="chip-link{% if not status_filter %} on{% endif %}" href="{{ url_for('orders_page') }}">全部</a>
+        {% for st, lb in labels.items() %}
+        <a class="chip-link{% if status_filter == st %} on{% endif %}" href="{{ url_for('orders_page', status=st) }}">{{ lb }}</a>
+        {% endfor %}
+    </p>
+    {% if rows %}
+    <div class="table-scroll">
+    <table class="cards">
+        <tr><th>單號</th><th>供應商</th><th>建立</th><th>預計到貨</th>
+            <th class="num">品項</th><th class="num">訂購</th><th class="num">已收</th><th>狀態</th><th>操作</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td data-label="單號">{{ r['po_no'] or '(未填單號)' }}</td>
+            <td data-label="供應商">{{ r['supplier_name'] or '—' }}</td>
+            <td data-label="建立">{{ r['created_local'] }}</td>
+            <td data-label="預計到貨">{{ r['eta'] or '—' }}</td>
+            <td data-label="品項" class="num">{{ r['item_count'] }}</td>
+            <td data-label="訂購" class="num">{{ r['ordered_total'] }}</td>
+            <td data-label="已收" class="num">{{ r['received_total'] }}</td>
+            <td data-label="狀態"><span class="chip-po chip-{{ r['status'] }}">{{ labels[r['status']] }}</span></td>
+            <td data-label="操作"><a class="plain" href="{{ url_for('order_detail', oid=r['id']) }}">開啟</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    </div>
+    {% else %}
+    <p>沒有符合條件的採購單。用上方表單建立第一張。</p>
+    {% endif %}
+</div>
+"""
+
+PAGE_ORDER_DETAIL = """
+<h1>採購單:{{ o['po_no'] or '(未填單號)' }}</h1>
+<p class="note">
+    供應商 {{ o['supplier_name'] or '未指定' }}・建立於 {{ o['created_local'] }}({{ o['username'] }})
+    {% if o['eta'] %}・預計到貨 {{ o['eta'] }}{% endif %}
+    {% if o['shipped_at'] %}<br>已於 {{ o['shipped_at'] }} 出貨{% if o['tracking_no'] %},追蹤號 {{ o['tracking_no'] }}{% endif %}{% endif %}
+    {% if o['arrived_at'] %}<br>已於 {{ o['arrived_local'] }} 登記到貨{% endif %}
+    {% if o['note'] %}<br>備註:{{ o['note'] }}{% endif %}
+</p>
+
+<div class="po-track">
+    {% for st in ['ordered','shipped','arrived','closed'] %}
+    <div class="po-node{% if step_index >= loop.index0 %} done{% endif %}{% if step_index == loop.index0 %} now{% endif %}">
+        <span class="po-dot"></span>
+        <span class="po-node-label">{{ labels[st] }}</span>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="stat-row">
+    <div class="stat-box"><div class="stat-num">{{ total }}</div><div class="stat-cap">明細品項</div></div>
+    <div class="stat-box"><div class="stat-num">{{ ordered_total }}</div><div class="stat-cap">訂購總量</div></div>
+    <div class="stat-box"><div class="stat-num">{{ received_total }}</div><div class="stat-cap">已入庫</div></div>
+    <div class="stat-box"><div class="stat-num"{% if onorder_total %} style="color:#b45309"{% endif %}>{{ onorder_total }}</div><div class="stat-cap">在途未到</div></div>
+</div>
+
+<div class="table-scroll">
+<table class="cards">
+    <tr><th>行</th><th>檔案料號</th><th>對應商品</th><th class="num">訂購</th>
+        <th class="num">已收</th><th class="num">在途</th><th class="num">單價</th><th>備註</th></tr>
+    {% for i in items %}
+    <tr{% if i['product_id'] is none %} class="has-diff"{% endif %}>
+        <td data-label="行">{{ i['line_no'] }}</td>
+        <td data-label="檔案料號">
+            <span class="loc-cell">{{ i['raw_sku'] or '—' }}</span>
+            {% if i['raw_name'] %}<br><span class="alias-cell">{{ i['raw_name'] }}</span>{% endif %}
+        </td>
+        <td data-label="對應商品">
+            {% if i['product_id'] %}
+                <a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['pname'] }}</a>
+                <br><span class="alias-cell">{{ i['psku'] }}・{{ i['match_label'] }}</span>
+            {% elif o['status'] in ('ordered','shipped','arrived') %}
+                <span class="badge-low">未對應</span>
+                <form class="inline count-form" method="post"
+                      action="{{ url_for('order_item_map', oid=o['id'], item_id=i['id']) }}">
+                    <select name="product_id" class="count-note">
+                        <option value="">選擇我方商品…</option>
+                        {% for p in product_list %}<option value="{{ p['id'] }}">{{ p['sku'] }} / {{ p['name'] }}</option>{% endfor %}
+                    </select>
+                    {% if o['supplier_name'] and i['raw_sku'] %}
+                    <label class="chk"><input type="checkbox" name="remember" value="1" checked>記住此對應</label>
+                    {% endif %}
+                    <button class="small-btn ok-btn" type="submit">指定</button>
+                </form>
+            {% else %}<span class="badge-low">未對應</span>{% endif %}
+        </td>
+        <td data-label="訂購" class="num">{{ i['ordered_qty'] }}</td>
+        <td data-label="已收" class="num">{{ i['received_qty'] }}</td>
+        <td data-label="在途" class="num">{{ i['onorder'] if i['onorder'] else '—' }}</td>
+        <td data-label="單價" class="num">{{ i['unit_cost'] if i['unit_cost'] is not none else '—' }}</td>
+        <td data-label="備註">{{ i['note'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+</div>
+
+{% if receipts %}
+<div class="detail-section">
+    <h2>由本訂單產生的收貨單</h2>
+    <table class="cards">
+        <tr><th>收貨單號</th><th>建立時間</th><th>狀態</th><th>操作</th></tr>
+        {% for r in receipts %}
+        <tr>
+            <td data-label="收貨單號">{{ r['ref_no'] or '(未填單號)' }}</td>
+            <td data-label="建立時間">{{ r['created_local'] }}</td>
+            <td data-label="狀態">
+                {% if r['status'] == 'posted' %}<span class="chip-posted">已放行</span>
+                {% elif r['status'] == 'cancelled' %}<span class="chip-void">已作廢</span>
+                {% else %}<span class="chip-open">待核對</span>{% endif %}
+            </td>
+            <td data-label="操作"><a class="plain" href="{{ url_for('receipt_detail', rid=r['id']) }}">開啟</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+{% if o['status'] in ('ordered','shipped') %}
+<div class="detail-section">
+    <h2>推進狀態</h2>
+    {% if o['status'] == 'ordered' %}
+    <p class="note">供應商通知出貨後,在這裡登記出貨日與追蹤號。若貨已直接送到,也可以跳過這步直接標記到貨。</p>
+    <form method="post" action="{{ url_for('order_ship', oid=o['id']) }}">
+        <label>出貨日</label><input type="date" name="shipped_at" value="{{ today }}">
+        <label>追蹤號 / 提單號(選填)</label><input type="text" name="tracking_no">
+        <input type="submit" value="標記為已出貨">
+    </form>
+    {% endif %}
+    <form method="post" action="{{ url_for('order_arrive', oid=o['id']) }}"
+          onsubmit="return confirm('確定登記到貨?系統會自動建立收貨單,現場核對數量後才會入庫。');">
+        <p class="note">
+            貨到了按這裡。系統會<strong>自動把這張訂單的明細變成收貨單</strong>,不必重新上傳或重打;
+            庫存此時仍不變,要等收貨單核對放行才入庫。
+        </p>
+        <input type="submit" value="登記到貨並自動建立收貨單">
+    </form>
+</div>
+{% endif %}
+
+{% if o['status'] in ('ordered','shipped','arrived') and session.get('is_admin') %}
+<div class="detail-section">
+    <h2>作廢</h2>
+    <p class="note">訂單取消或重下時使用。作廢後不再計入在途量,也不影響庫存。</p>
+    <form method="post" action="{{ url_for('order_cancel', oid=o['id']) }}"
+          onsubmit="return confirm('確定作廢這張採購單?');">
+        <button class="small-btn" type="submit">作廢此採購單</button>
     </form>
 </div>
 {% endif %}
@@ -2399,10 +2764,12 @@ def query_products(q="", category="", limit=None, offset=0):
         params += [limit + 1, offset]   # 多取一筆用來判斷是否還有下一頁
     rows = [dict(r) for r in get_db().execute(sql, params).fetchall()]
     resv = reserved_map()
+    onord = onorder_map()
     for r in rows:
         r["unit_price_str"] = fmt_money(r["unit_price"])
         r["reserved"] = resv.get(r["id"], 0)
         r["available"] = r["quantity"] - r["reserved"]   # 業界的 on-hand vs available 區分
+        r["onorder"] = onord.get(r["id"], 0)             # 已下訂尚未入庫(在途)
     return rows
 
 
@@ -2426,8 +2793,11 @@ def render_index(error=None, msg=None):
     low_count = sum(1 for r in db.execute(
         "SELECT id, quantity, low_stock_threshold FROM products WHERE low_stock_threshold > 0"
     ).fetchall() if (r["quantity"] - resv_all.get(r["id"], 0)) <= r["low_stock_threshold"])
+    po_summary = po_status_summary()
     return render_page(PAGE_INDEX, products=products, q=q, category=category,
                        categories=categories, low_count=low_count,
+                       po_summary=po_summary, po_labels=PO_STATUS_LABEL,
+                       po_summary_total=sum(v["orders"] for v in po_summary.values()),
                        pager=build_pager("index", page, has_next, q=q, category=category),
                        error=error, msg=msg)
 
@@ -2682,8 +3052,22 @@ def render_product_detail(pid, error=None, msg=None):
         d["received_local"] = fmt_local(l["received_at"])
         d["cost_str"] = fmt_money(l["unit_cost"]) if l["unit_cost"] is not None else "—"
         lots.append(d)
+    # 在途採購:這項料還有多少在路上、哪幾張單
+    open_pos = []
+    for r in db.execute(f"""
+            SELECT o.id, o.po_no, o.status, o.eta, i.ordered_qty, i.received_qty
+            FROM purchase_order_items i JOIN purchase_orders o ON i.po_id = o.id
+            WHERE i.product_id = ? AND o.status IN ({','.join('?' * len(ONORDER_STATUSES))})
+            ORDER BY o.id DESC
+        """, (pid, *ONORDER_STATUSES)).fetchall():
+        d = dict(r)
+        d["onorder"] = max(0, r["ordered_qty"] - r["received_qty"])
+        d["status_label"] = PO_STATUS_LABEL.get(r["status"], r["status"])
+        open_pos.append(d)
     return render_page(PAGE_PRODUCT_DETAIL, p=p, images=images, aliases=aliases,
-                       recent_tx=recent_tx, lots=lots, error=error, msg=msg)
+                       recent_tx=recent_tx, lots=lots, open_pos=open_pos,
+                       onorder_total=sum(d["onorder"] for d in open_pos),
+                       error=error, msg=msg)
 
 
 @app.route("/products/<int:pid>")
@@ -3429,6 +3813,320 @@ def count_post(cid):
 
 
 # ---------------------------------------------------------------------------
+# 採購訂單:下訂 → 出貨 → 到貨(自動生成收貨單)→ 核對放行 → 結案
+# ---------------------------------------------------------------------------
+
+ORDER_HEADER = ["料號", "品名", "數量", "單價", "預計到貨日", "備註"]
+PO_STEPS = ["ordered", "shipped", "arrived", "closed"]
+
+
+def parse_order_rows(db, rows, default_eta=""):
+    """把資料列轉成採購明細;逐列比對料號(與收貨單共用 match_part)。"""
+    items = []
+    for line_no, row in rows:
+        row = list(row) + [""] * (6 - len(row))
+        raw_sku, raw_name, qty_s, cost_s, eta, note = [str(c).strip() for c in row[:6]]
+        if not raw_sku and not raw_name:
+            continue
+        qty = safe_int(qty_s) or 0
+        if qty < 0 or qty > MAX_QUANTITY:
+            qty = 0
+        try:
+            cost = float(cost_s) if cost_s else None
+            if cost is not None and (not math.isfinite(cost) or cost < 0 or cost > MAX_QUANTITY):
+                cost = None
+        except (ValueError, TypeError, OverflowError):
+            cost = None
+        pid, mtype, mnote = match_part(db, raw_sku, raw_name)
+        items.append({"line_no": line_no, "raw_sku": raw_sku, "raw_name": raw_name,
+                      "product_id": pid, "match_type": mtype, "match_note": mnote,
+                      "ordered_qty": qty, "unit_cost": cost,
+                      "eta": eta or default_eta, "note": note})
+    return items
+
+
+@app.route("/orders")
+@login_required
+def orders_page(error=None, msg=None):
+    db = get_db()
+    status = request.args.get("status", "").strip()
+    where, params = "", []
+    if status in PO_STATUS_LABEL:
+        where, params = "WHERE o.status = ?", [status]
+    rows = []
+    for r in db.execute(f"""
+            SELECT o.*,
+                   (SELECT COUNT(*) FROM purchase_order_items i WHERE i.po_id = o.id) AS item_count,
+                   (SELECT COALESCE(SUM(i.ordered_qty), 0) FROM purchase_order_items i WHERE i.po_id = o.id) AS ordered_total,
+                   (SELECT COALESCE(SUM(i.received_qty), 0) FROM purchase_order_items i WHERE i.po_id = o.id) AS received_total
+            FROM purchase_orders o {where} ORDER BY o.id DESC LIMIT 100
+        """, params).fetchall():
+        d = dict(r)
+        d["created_local"] = fmt_local(r["created_at"])
+        rows.append(d)
+    return render_page(PAGE_ORDERS, rows=rows,
+                       suppliers=db.execute("SELECT id, name FROM suppliers ORDER BY name").fetchall(),
+                       summary=po_status_summary(), labels=PO_STATUS_LABEL,
+                       status_filter=status if status in PO_STATUS_LABEL else "",
+                       error=error, msg=msg)
+
+
+@app.route("/orders/template.csv")
+@login_required
+def order_template():
+    return csv_response(ORDER_HEADER,
+                        [("ABC-001", "範例品名", "100", "12.5", "2026-09-30", "此列為範例,請刪除")],
+                        "order_template.csv")
+
+
+@app.route("/orders/upload", methods=["POST"])
+@login_required
+def order_upload():
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return orders_page(error="請先選擇採購明細檔案(Excel 或 CSV)")
+    rows, error = read_table_file(file.filename, file.read())
+    if error:
+        return orders_page(error=error)
+    db = get_db()
+    eta = request.form.get("eta", "").strip()
+    items = parse_order_rows(db, rows[1:], eta)
+    if not items:
+        return orders_page(error="檔案中沒有可讀取的明細,請確認格式:料號,品名,數量,單價,預計到貨日,備註")
+    supplier_id = safe_int(request.form.get("supplier_id", ""))
+    supplier_name = ""
+    if supplier_id is not None:
+        srow = db.execute("SELECT name FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+        supplier_name = srow["name"] if srow else ""
+        if srow is None:
+            supplier_id = None
+    ts = now_str()
+    cur = db.execute("""
+        INSERT INTO purchase_orders (po_no, supplier_id, supplier_name, status, eta,
+                                     note, username, created_at)
+        VALUES (?, ?, ?, 'ordered', ?, ?, ?, ?)
+    """, (request.form.get("po_no", "").strip(), supplier_id, supplier_name, eta,
+          request.form.get("note", "").strip(), session.get("username", ""), ts))
+    oid = cur.lastrowid
+    for it in items:
+        db.execute("""
+            INSERT INTO purchase_order_items (po_id, line_no, raw_sku, raw_name, product_id,
+                                              match_type, match_note, ordered_qty, unit_cost, eta, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (oid, it["line_no"], it["raw_sku"], it["raw_name"], it["product_id"],
+              it["match_type"], it["match_note"], it["ordered_qty"], it["unit_cost"],
+              it["eta"], it["note"]))
+    unmatched = sum(1 for i in items if i["product_id"] is None)
+    audit("建立採購單", "採購", oid, f"{file.filename}:{len(items)} 列,未對應 {unmatched} 列")
+    db.commit()
+    return redirect(url_for("order_detail", oid=oid))
+
+
+def render_order_detail(oid, error=None, msg=None):
+    db = get_db()
+    o = db.execute("SELECT * FROM purchase_orders WHERE id = ?", (oid,)).fetchone()
+    if o is None:
+        return orders_page(error="找不到指定的採購單")
+    od = dict(o)
+    od["created_local"] = fmt_local(o["created_at"])
+    od["arrived_local"] = fmt_local(o["arrived_at"]) if o["arrived_at"] else ""
+    items, ordered_total, received_total, onorder_total = [], 0, 0, 0
+    for row in db.execute("""
+            SELECT i.*, p.sku AS psku, p.name AS pname FROM purchase_order_items i
+            LEFT JOIN products p ON i.product_id = p.id
+            WHERE i.po_id = ? ORDER BY i.line_no, i.id
+        """, (oid,)).fetchall():
+        d = dict(row)
+        label = MATCH_LABELS.get(row["match_type"], row["match_type"])
+        if row["match_type"] == "alias" and row["match_note"]:
+            label = f"別名:{row['match_note']}"
+        d["match_label"] = label
+        d["onorder"] = max(0, row["ordered_qty"] - row["received_qty"])
+        ordered_total += row["ordered_qty"]
+        received_total += row["received_qty"]
+        onorder_total += d["onorder"]
+        items.append(d)
+    receipts = []
+    for r in db.execute("SELECT * FROM receipts WHERE po_id = ? ORDER BY id DESC", (oid,)).fetchall():
+        rd = dict(r)
+        rd["created_local"] = fmt_local(r["created_at"])
+        receipts.append(rd)
+    step = PO_STEPS.index(o["status"]) if o["status"] in PO_STEPS else 0
+    return render_page(PAGE_ORDER_DETAIL, o=od, items=items, total=len(items),
+                       ordered_total=ordered_total, received_total=received_total,
+                       onorder_total=onorder_total, receipts=receipts,
+                       labels=PO_STATUS_LABEL, step_index=step,
+                       today=today_local().isoformat(),
+                       product_list=product_dropdown(), error=error, msg=msg)
+
+
+@app.route("/orders/<int:oid>")
+@login_required
+def order_detail(oid):
+    return render_order_detail(oid)
+
+
+def open_order_or_error(oid):
+    """取回仍可推進的採購單;不可動時回 (None, 錯誤訊息)。"""
+    o = get_db().execute("SELECT * FROM purchase_orders WHERE id = ?", (oid,)).fetchone()
+    if o is None:
+        return None, "找不到指定的採購單"
+    if o["status"] == "closed":
+        return None, "此採購單已入庫結案,不可再變更"
+    if o["status"] == "cancelled":
+        return None, "此採購單已作廢,不可再變更"
+    return o, None
+
+
+@app.route("/orders/<int:oid>/items/<int:item_id>/map", methods=["POST"])
+@login_required
+def order_item_map(oid, item_id):
+    o, err = open_order_or_error(oid)
+    if err:
+        return orders_page(error=err) if "找不到" in err else render_order_detail(oid, error=err)
+    db = get_db()
+    pid = safe_int(request.form.get("product_id", ""))
+    if pid is None:
+        return render_order_detail(oid, error="請選擇要對應的我方商品")
+    item = db.execute("SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?",
+                      (item_id, oid)).fetchone()
+    if item is None:
+        return render_order_detail(oid, error="找不到指定的明細列")
+    if db.execute("SELECT 1 FROM products WHERE id = ?", (pid,)).fetchone() is None:
+        return render_order_detail(oid, error="找不到指定的商品")
+    db.execute("UPDATE purchase_order_items SET product_id = ?, match_type = 'manual', match_note = '' WHERE id = ?",
+               (pid, item_id))
+    remembered = ""
+    if request.form.get("remember") and o["supplier_name"] and item["raw_sku"]:
+        try:
+            db.execute("""
+                INSERT INTO part_aliases (product_id, company, alias_sku, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (pid, o["supplier_name"], item["raw_sku"], f"採購單 {o['po_no'] or oid} 建立", now_str()))
+            remembered = ",並記住為別名"
+            audit("新增別名", "商品", pid, f"{o['supplier_name']}:{item['raw_sku']}(採購單對應)")
+        except sqlite3.IntegrityError:
+            pass
+    db.commit()
+    return render_order_detail(oid, msg=f"已對應第 {item['line_no']} 列{remembered}")
+
+
+@app.route("/orders/<int:oid>/ship", methods=["POST"])
+@login_required
+def order_ship(oid):
+    o, err = open_order_or_error(oid)
+    if err:
+        return orders_page(error=err) if "找不到" in err else render_order_detail(oid, error=err)
+    if o["status"] != "ordered":
+        return render_order_detail(oid, error="此採購單已標記過出貨,不可重複標記")
+    db = get_db()
+    db.execute("UPDATE purchase_orders SET status = 'shipped', shipped_at = ?, tracking_no = ? WHERE id = ?",
+               (request.form.get("shipped_at", "").strip() or today_local().isoformat(),
+                request.form.get("tracking_no", "").strip(), oid))
+    audit("採購單出貨", "採購", oid, o["po_no"] or f"#{oid}")
+    db.commit()
+    return render_order_detail(oid, msg="已標記為出貨中")
+
+
+@app.route("/orders/<int:oid>/arrive", methods=["POST"])
+@login_required
+def order_arrive(oid):
+    """登記到貨,並把訂單明細自動轉成收貨單——這是「登記自動化」的核心:
+    同一份明細只登記一次,現場只需核對數量,不必重新上傳或重打料號。"""
+    o, err = open_order_or_error(oid)
+    if err:
+        return orders_page(error=err) if "找不到" in err else render_order_detail(oid, error=err)
+    db = get_db()
+    # 分批到貨是常態:只要還有未收足的品項就能再登記一次,但不允許同時存在
+    # 兩張待核對的收貨單——那會讓現場不知道該核對哪一張,也會重複入庫
+    waiting = db.execute(
+        "SELECT id FROM receipts WHERE po_id = ? AND status = 'open' ORDER BY id DESC",
+        (oid,)).fetchone()
+    if waiting:
+        return render_order_detail(
+            oid, error=f"此採購單已登記過到貨,且收貨單 #{waiting['id']} 還在待核對——"
+                       "請先完成該收貨單的核對與放行,再登記下一批到貨")
+    items = db.execute("""
+        SELECT * FROM purchase_order_items WHERE po_id = ? ORDER BY line_no, id
+    """, (oid,)).fetchall()
+    pending = [i for i in items if i["ordered_qty"] > i["received_qty"]]
+    if not pending:
+        return render_order_detail(oid, error="此採購單的品項都已收足,沒有待到貨的明細")
+    ts = now_str()
+    # 分批到貨時單號要能分辨是第幾批,否則兩張收貨單長得一模一樣
+    batch = db.execute("SELECT COUNT(*) AS c FROM receipts WHERE po_id = ?", (oid,)).fetchone()["c"] + 1
+    base = o["po_no"] or f"PO#{oid}"
+    ref = f"{base}-到貨" if batch == 1 else f"{base}-到貨第{batch}批"
+    cur = db.execute("""
+        INSERT INTO receipts (ref_no, supplier_id, supplier_name, source, status,
+                              note, username, created_at, po_id)
+        VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)
+    """, (ref, o["supplier_id"], o["supplier_name"], f"採購單到貨自動建立(#{oid},第 {batch} 批)",
+          o["note"], session.get("username", ""), ts, oid))
+    rid = cur.lastrowid
+    for it in pending:
+        db.execute("""
+            INSERT INTO receipt_items (receipt_id, line_no, raw_sku, raw_name, product_id,
+                                       match_type, match_note, expected_qty, lot_no,
+                                       expiry_date, unit_cost, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?)
+        """, (rid, it["line_no"], it["raw_sku"], it["raw_name"], it["product_id"],
+              it["match_type"], it["match_note"], it["ordered_qty"] - it["received_qty"],
+              it["unit_cost"], it["note"]))
+    db.execute("UPDATE purchase_orders SET status = 'arrived', arrived_at = ? WHERE id = ?", (ts, oid))
+    audit("採購單到貨", "採購", oid,
+          f"{o['po_no'] or '#' + str(oid)}:自動建立收貨單 #{rid},{len(pending)} 個品項")
+    db.commit()
+    return redirect(url_for("receipt_detail", rid=rid))
+
+
+@app.route("/orders/<int:oid>/cancel", methods=["POST"])
+@admin_required
+def order_cancel(oid):
+    db = get_db()
+    o = db.execute("SELECT * FROM purchase_orders WHERE id = ?", (oid,)).fetchone()
+    if o is None:
+        return orders_page(error="找不到指定的採購單")
+    if o["status"] == "closed":
+        return render_order_detail(oid, error="此採購單已結案,不可作廢")
+    db.execute("UPDATE purchase_orders SET status = 'cancelled' WHERE id = ?", (oid,))
+    audit("採購單作廢", "採購", oid, o["po_no"] or f"#{oid}")
+    db.commit()
+    return redirect(url_for("order_detail", oid=oid))
+
+
+def writeback_po_receipt(db, receipt_row, posted):
+    """收貨單放行後回寫來源採購單的已收量;全數收齊即自動結案。
+    posted 為 {product_id: 實收量} 的累計。"""
+    po_id = receipt_row["po_id"] if "po_id" in receipt_row.keys() else None
+    if not po_id or not posted:
+        return
+    items = db.execute("SELECT * FROM purchase_order_items WHERE po_id = ? ORDER BY line_no, id",
+                       (po_id,)).fetchall()
+    remaining = dict(posted)
+    for it in items:
+        pid = it["product_id"]
+        if pid is None or remaining.get(pid, 0) <= 0:
+            continue
+        need = it["ordered_qty"] - it["received_qty"]
+        if need <= 0:
+            continue
+        take = min(need, remaining[pid])
+        db.execute("UPDATE purchase_order_items SET received_qty = received_qty + ? WHERE id = ?",
+                   (take, it["id"]))
+        remaining[pid] -= take
+    still = db.execute("""
+        SELECT COALESCE(SUM(CASE WHEN ordered_qty > received_qty
+                                 THEN ordered_qty - received_qty ELSE 0 END), 0) AS left_qty
+        FROM purchase_order_items WHERE po_id = ?
+    """, (po_id,)).fetchone()["left_qty"]
+    if still == 0:
+        db.execute("UPDATE purchase_orders SET status = 'closed', closed_at = ? WHERE id = ?",
+                   (now_str(), po_id))
+        audit("採購單結案", "採購", po_id, "全部品項已入庫")
+
+
+# ---------------------------------------------------------------------------
 # 收貨單(ASN):供應商檔案 → 預先登記 → 逐項核對 → 放行才入庫
 # ---------------------------------------------------------------------------
 
@@ -3683,10 +4381,12 @@ def receipt_post(rid):
     ts = now_str()
     ref = r["ref_no"] or f"#{rid}"
     total_qty = 0
+    posted_by_product = {}     # 供回寫來源採購單的已收量
     for it in items:
         if it["product_id"] is None or not (it["received_qty"] or 0) > 0:
             continue
         pid, qty = it["product_id"], it["received_qty"]
+        posted_by_product[pid] = posted_by_product.get(pid, 0) + qty
         note = f"收貨單 {ref}" + (f":{it['note']}" if it["note"] else "")
         db.execute("UPDATE products SET quantity = quantity + ? WHERE id = ?", (qty, pid))
         cur = db.execute("""
@@ -3712,6 +4412,7 @@ def receipt_post(rid):
         total_qty += qty
     db.execute("UPDATE receipts SET status = 'posted', posted_at = ? WHERE id = ?", (ts, rid))
     audit("收貨單放行", "收貨", rid, f"{ref}:入庫 {len(postable)} 項,合計 {total_qty}")
+    writeback_po_receipt(db, r, posted_by_product)   # 有來源採購單時回寫已收量並判斷結案
     db.commit()
     return render_receipt_detail(rid, msg=f"放行完成:{len(postable)} 項已入庫,合計 {total_qty}")
 
