@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.08.07"
+APP_VERSION = "2026.09.03"
 
 app = Flask(__name__)
 
@@ -365,6 +365,7 @@ def init_db():
     # 收貨單回指採購單:到貨時自動生成的收貨單要知道自己來自哪一張訂單
     ensure_column(conn, "receipts", "po_id", "INTEGER")
     # 既有資料庫的欄位擴充(SQLite 的 ADD COLUMN 重複執行會報錯,故先檢查)
+    ensure_column(conn, "transactions", "reverses", "INTEGER")
     ensure_column(conn, "products", "location", "TEXT DEFAULT ''")
     ensure_column(conn, "products", "purchase_unit", "TEXT DEFAULT ''")
     ensure_column(conn, "products", "units_per_purchase", "INTEGER DEFAULT 1")
@@ -772,435 +773,563 @@ LAYOUT = """
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>庫存管理系統</title>
+    <title>{% if page_title %}{{ page_title }} — {% endif %}庫存管理系統</title>
     <style>
-        /* 色彩代幣:深藏青 + 琥珀(工業倉儲識別色),使用者要求「大膽、不死板」 */
-        :root { --ink: #17223b; --ink-2: #1f2e50; --ink-line: #32436b;
-                --accent: #f5a31a; --accent-deep: #e08e00; --accent-ink: #241503;
-                --paper: #e9edf3; --card: #fff; --line: #dde3ec;
-                --text: #1e293b; --mute: #64748b;
-                --blue: #2563eb; --green: #15803d; --red: #b91c1c; --violet: #7c3aed; --teal: #0d9488;
-                /* 層次:陰影用藏青而非純黑,陰影才會跟版面同一個色溫 */
-                --sh-1: 0 1px 2px rgba(23,34,59,.06), 0 1px 3px rgba(23,34,59,.05);
-                --sh-2: 0 2px 4px rgba(23,34,59,.06), 0 4px 12px rgba(23,34,59,.08);
-                --sh-3: 0 8px 16px rgba(23,34,59,.10), 0 16px 32px rgba(23,34,59,.10);
-                --sh-accent: 0 1px 2px rgba(146,64,14,.20), 0 2px 8px rgba(245,163,26,.28);
-                --r-sm: 7px; --r-md: 11px; --r-lg: 15px;
-                --ease: cubic-bezier(.2,.7,.3,1); }
+        /* ============================================================
+           設計代幣(第九階段第 1 批)
+           規則一:一色一義。琥珀=等你動手;靛藍=在路上/純資訊;綠=已定案;
+                   紫=有貨但不能動;紅=壞消息與破壞性動作。不得兼差。
+           規則二:字重只有 400 與 700。Windows 中文落到微軟正黑體,
+                   只有這兩個真字重,600/800 是瀏覽器合成的假粗體。
+           規則三:所有中性色都由 --hull 深藏青混白而來,不借用框架預設灰。
+           ============================================================ */
+        :root {
+            color-scheme: light dark;
+            /* 骨架與中性階 */
+            --hull: #0f1b2e; --hull-2: #16243c; --hull-3: #22334f;
+            --on-hull: #f2f5fa; --on-hull-2: #aebbce;
+            --text: #121b2b; --mute: #495467; --line-str: #7f8d9f;
+            --line: #d5dae1; --line-2: #c1c8d2; --wash: #edeff3;
+            --paper: #dfe3e9; --card: #ffffff;
+            /* 語意色:每個只有一個意思 */
+            --amber: #f2a20c; --amber-on: #2a1902; --amber-text: #8a5106; --amber-soft: #fdf0d8;
+            --transit: #2e5aac; --transit-text: #24488a; --transit-soft: #e4ecf9;
+            --onhand: #12674a; --onhand-text: #0e5239; --onhand-soft: #e0f0e8;
+            --held: #5a4aa0;   --held-text: #4a3c8c;   --held-soft: #ebe8f7;
+            --fault: #b0202e;  --fault-text: #96131f;  --fault-soft: #fbe6e7;
+            /* 過期/呆滯的第二個編碼:色盲、黑白列印、投影失真都分得出來 */
+            --hatch: repeating-linear-gradient(45deg, #fbe6e7 0 7px, #f4d2d5 7px 14px);
+            /* 每個語意色的邊框階與互動階,避免在規則裡散落一次性 hex */
+            --amber-edge: #e9c787; --amber-hi: #ffb020; --amber-line: #d68b04;
+            --transit-edge: #b7cbec; --onhand-edge: #a9cebe;
+            --held-edge: #c3b9ea; --fault-edge: #e7aeb3;
+            --white: #ffffff;
+            --search-icon: #8496ae; --search-ph: #8fa0b8; --search-focus: #1b2c48;
+            --print-ink: #121b2b; --print-mute: #495467;
+            /* 字體:拉丁排前面,數字與英文才走得到有真等寬數字的字體 */
+            --font-ui: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto,
+                       "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", sans-serif;
+            --font-code: "Cascadia Mono", Consolas, "SF Mono", ui-monospace, Menlo, monospace;
+            /* 字級:六級全整數,中文下限 13px */
+            --t1: 12px; --t2: 13px; --t3: 15px; --t4: 18px; --t5: 24px; --t6: 34px;
+            /* 間距:基數 4,只允許七個值 */
+            --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+            --r-ctl: 4px; --r-pane: 10px;
+            --sh-1: 0 1px 2px rgba(15,27,46,.06), 0 1px 3px rgba(15,27,46,.05);
+            --sh-2: 0 2px 6px rgba(15,27,46,.08), 0 8px 20px rgba(15,27,46,.10);
+            --sh-3: 0 10px 24px rgba(15,27,46,.16), 0 20px 48px rgba(15,27,46,.14);
+            --ease: cubic-bezier(.2,.7,.3,1);
+        }
+        /* 深色主題:整套代幣重新定義。舊版只覆寫六條規則,
+           造成淺底上出現深色區塊、儲位欄變成 1.48:1 幾乎看不見 */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --hull: #060b14; --hull-2: #0e1727; --hull-3: #26344b;
+                --on-hull: #f2f5fa; --on-hull-2: #a9b6c9;
+                --text: #e8ecf3; --mute: #a3afc0; --line-str: #6c7a8d;
+                --line: #2a3548; --line-2: #3a4759; --wash: #182234;
+                --paper: #0b1220; --card: #131d2e;
+                --amber: #f2a20c; --amber-on: #201302; --amber-text: #f0b44a; --amber-soft: #3a2a0c;
+                --transit: #5b8ce0; --transit-text: #8fb3ee; --transit-soft: #16243f;
+                --onhand: #2fa277; --onhand-text: #63c39c; --onhand-soft: #102a22;
+                --held: #9184d8;   --held-text: #a79be6;   --held-soft: #221e38;
+                --fault: #e05563;  --fault-text: #f1919a;  --fault-soft: #331419;
+                --hatch: repeating-linear-gradient(45deg, #331419 0 7px, #43191f 7px 14px);
+                --search-icon: #7f8ea6; --search-ph: #8494ad; --search-focus: #16243c;
+                /* 白紙色與列印色不隨主題改變:QR 與貨架標籤在深色主題下仍印在白紙上 */
+                --white: #ffffff; --print-ink: #121b2b; --print-mute: #495467;
+                --amber-edge: #6b4d10; --amber-hi: #ffb020; --amber-line: #8a6408;
+                --transit-edge: #2c4270; --onhand-edge: #1c4a38;
+                --held-edge: #3d3468; --fault-edge: #5c2830;
+                --sh-1: 0 1px 2px rgba(0,0,0,.40);
+                --sh-2: 0 2px 6px rgba(0,0,0,.44), 0 8px 20px rgba(0,0,0,.40);
+                --sh-3: 0 10px 24px rgba(0,0,0,.50);
+            }
+        }
         @media (prefers-reduced-motion: reduce) {
             * { transition: none !important; animation: none !important; }
         }
         * { box-sizing: border-box; }
-        body { margin: 0; background: var(--paper); color: var(--text); font-size: 15px; line-height: 1.55;
-               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
-        nav { position: sticky; top: 0; z-index: 10; background: var(--ink); display: flex; align-items: stretch;
-              gap: 2px; padding: 0 14px; box-shadow: 0 2px 8px rgba(15,23,42,.3); }
-        nav .brand { display: flex; align-items: center; gap: 7px; color: #fff; text-decoration: none;
-                     font-weight: 800; font-size: 15px; letter-spacing: .04em; padding: 12px 10px 12px 0; margin-right: 6px; }
-        nav .brand .brand-mark { display: inline-block; width: 12px; height: 12px; background: var(--accent);
-                                 border-radius: 3px; box-shadow: 3px -3px 0 0 rgba(245,163,26,.35); }
-        nav > a.top, nav summary { display: flex; align-items: center; color: #c3cde0; text-decoration: none;
-              padding: 13px 12px; font-size: 14px; font-weight: 600; border-bottom: 3px solid transparent; cursor: pointer; }
+        body { margin: 0; background: var(--paper); color: var(--text);
+               font-size: var(--t3); line-height: 1.75; font-family: var(--font-ui);
+               -webkit-font-smoothing: antialiased; }
+        .mono { font-family: var(--font-code); font-variant-numeric: tabular-nums; }
+        .unit { font-family: var(--font-ui); font-size: var(--t2); color: var(--mute);
+                font-weight: 400; margin-left: 2px; }
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
+                   clip: rect(0 0 0 0); white-space: nowrap; }
+
+        /* ── 頂列:品牌 + 全站搜尋 + 使用者。搜尋在每一頁的同一個位置 ── */
+        .topbar { position: sticky; top: 0; z-index: 40; background: var(--hull);
+                  display: flex; align-items: center; gap: var(--s4);
+                  padding: 0 var(--s4); height: 52px; border-bottom: 1px solid var(--hull-3); }
+        .topbar .brand { display: flex; align-items: center; gap: var(--s2); color: #fff;
+                         text-decoration: none; font-size: var(--t3); font-weight: 700; white-space: nowrap; }
+        .topbar .brand-mark { width: 9px; height: 20px; background: var(--amber);
+                              display: block; border-radius: 1px;
+                              box-shadow: 5px 0 0 -2px rgba(242,162,12,.45); }
+        .gsearch { flex: 1 1 auto; max-width: 520px; display: flex; position: relative; }
+        .gsearch svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+                       width: 17px; height: 17px; color: var(--search-icon); pointer-events: none; }
+        .topbar .gsearch input[type=search] {
+            width: 100%; height: 36px; margin: 0; padding: 0 var(--s3) 0 36px;
+            font: inherit; font-size: var(--t2); color: var(--on-hull);
+            background: var(--hull-2); border: 1px solid var(--hull-3);
+            border-radius: var(--r-ctl); -webkit-appearance: none; }
+        .topbar .gsearch input[type=search]::placeholder { color: var(--search-ph); }
+        .topbar .gsearch input[type=search]:focus { outline: 3px solid var(--amber);
+            outline-offset: 1px; background: var(--search-focus); border-color: var(--amber); }
+        .user-info { margin-left: auto; color: var(--on-hull-2); font-size: var(--t2); white-space: nowrap; }
+        .user-info a { color: var(--on-hull-2); }
+
+        /* ── 導覽:倉庫語彙分組,零 JS 的 details ── */
+        nav { position: sticky; top: 52px; z-index: 35; background: var(--hull-2);
+              display: flex; padding: 0 var(--s4); border-bottom: 1px solid var(--hull-3); }
+        nav > a.top, nav summary { display: flex; align-items: center; padding: 0 var(--s3);
+              height: 38px; color: var(--on-hull-2); text-decoration: none;
+              font-size: var(--t2); font-weight: 400; border-bottom: 3px solid transparent;
+              cursor: pointer; white-space: nowrap; }
         nav > a.top:hover, nav summary:hover { color: #fff; }
-        nav > a.top.active { color: #fff; border-bottom-color: var(--accent); }
+        nav > a.top.active { color: #fff; font-weight: 700; border-bottom-color: var(--amber); }
         nav details.menu { position: relative; }
-        nav details.menu > summary { list-style: none; gap: 5px; user-select: none; height: 100%; }
+        nav details.menu > summary { list-style: none; gap: 5px; user-select: none; }
         nav details.menu > summary::-webkit-details-marker { display: none; }
-        nav details.menu > summary::after { content: "▾"; font-size: 10px; opacity: .65; }
-        nav details.menu[open] > summary { color: #fff; background: var(--ink-2); }
-        nav details.menu.here > summary { color: #fff; border-bottom-color: var(--accent); }
-        nav .menu-panel { position: absolute; top: 100%; left: 0; min-width: 172px; background: var(--card);
-                          border: 1px solid var(--line); border-radius: 0 10px 10px 10px; padding: 6px;
-                          box-shadow: 0 14px 30px rgba(23,34,59,.22); z-index: 20; }
-        nav .menu-panel a { display: block; color: var(--text); text-decoration: none; padding: 9px 13px;
-                            border-radius: 7px; font-size: 14px; white-space: nowrap; }
-        nav .menu-panel a:hover { background: #f2f6fc; color: var(--blue); }
-        nav .menu-panel a.active { background: #fff3d6; color: #92400e; font-weight: 700; }
-        nav .user-info { margin-left: auto; display: flex; align-items: center; color: #8fa0be; font-size: 13px; padding-left: 12px; }
-        nav .user-info a { color: #c3cde0; }
-        /* 這是資料表為主的系統,容器給寬一點;表單頁的輸入框本來就自限 420px,不受影響 */
-        .container { max-width: 1220px; margin: 24px auto; background: var(--card); padding: 24px 28px 28px;
-                     border-radius: var(--r-lg); border: 1px solid var(--line); box-shadow: var(--sh-1); }
-        /* 頁標題:琥珀色識別條,每頁自動帶入(大膽識別,不必逐頁改) */
-        h1 { font-size: 23px; font-weight: 800; letter-spacing: -.01em; margin: 0 0 16px; color: #0f172a;
-             position: relative; padding-left: 15px; }
-        h1::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 5px;
-                     background: var(--accent); border-radius: 3px; }
-        h2 { font-size: 16px; margin: 0 0 10px; color: #0f172a; padding-left: 10px; border-left: 4px solid var(--accent); }
-        /* 表格:去掉格線改用橫線分隔,資料才不會被網格切碎;整張表包在圓角卡片裡 */
-        table { border-collapse: separate; border-spacing: 0; width: 100%; margin-top: 14px;
-                font-size: 13.5px; border-radius: var(--r-md); overflow: hidden;
-                box-shadow: var(--sh-1); background: var(--card); }
-        th, td { border: none; border-bottom: 1px solid var(--line);
-                 padding: 9px 12px; text-align: left; vertical-align: middle; }
-        /* 12 欄在窄螢幕放不下,讓表格自己橫向捲動,不要把版面撐破 */
-        .table-scroll { overflow-x: auto; margin-top: 14px; border-radius: var(--r-md); }
-        .table-scroll > table { margin-top: 0; }
-        /* 深色表頭:表格是本系統的主角,給它舞台感 */
-        th { background: var(--ink); color: #dbe3f2; font-size: 12.5px; font-weight: 600;
-             border-color: var(--ink-line); letter-spacing: .04em; word-break: keep-all;
-             position: sticky; top: 0; z-index: 2; }
+        nav details.menu > summary::after { content: ""; width: 0; height: 0;
+              border: 4px solid transparent; border-top-color: currentColor; margin-top: 4px; }
+        nav details.menu[open] > summary { color: #fff; background: var(--hull); }
+        nav details.menu.here > summary { color: #fff; font-weight: 700; border-bottom-color: var(--amber); }
+        nav .menu-panel { position: absolute; top: 100%; left: 0; min-width: 186px;
+              background: var(--card); border: 1px solid var(--line);
+              border-radius: 0 var(--r-pane) var(--r-pane) var(--r-pane);
+              padding: var(--s1); box-shadow: var(--sh-2); z-index: 50; }
+        nav .menu-panel a { display: block; color: var(--text); text-decoration: none;
+              padding: var(--s2) var(--s3); border-radius: var(--r-ctl);
+              font-size: var(--t2); white-space: nowrap; }
+        nav .menu-panel a:hover { background: var(--wash); }
+        nav .menu-panel a.active { background: var(--amber-soft); color: var(--amber-text); font-weight: 700; }
+
+        /* ── 版面 ── */
+        .container { max-width: 1240px; margin: var(--s5) auto; padding: 0 var(--s4); }
+        /* 純表單頁收窄,避免 420px 的輸入框漂在 1200px 的版面裡 */
+        .container.narrow { max-width: 820px; }
+        .crumb { font-size: var(--t2); color: var(--mute); margin-bottom: var(--s2); }
+        .crumb a { color: var(--transit-text); text-decoration: none; }
+        .crumb a:hover { text-decoration: underline; }
+        h1 { font-size: var(--t5); font-weight: 700; margin: 0 0 var(--s4);
+             line-height: 1.35; color: var(--text); }
+        h2 { font-size: var(--t4); font-weight: 700; margin: var(--s6) 0 var(--s3); line-height: 1.45; }
+        .pane { background: var(--card); border: 1px solid var(--line);
+                border-radius: var(--r-pane); box-shadow: var(--sh-1);
+                margin-bottom: var(--s5); overflow: hidden; }
+        .pane-h { display: flex; align-items: center; gap: var(--s3); background: var(--hull);
+                  color: var(--on-hull); padding: 10px var(--s4); font-size: var(--t2); font-weight: 700; }
+        .pane-h .r { margin-left: auto; font-weight: 400; color: var(--on-hull-2); font-size: var(--t2); }
+        .pane-h a { color: var(--amber); text-decoration: none; }
+        .pane-b { padding: var(--s4); }
+        .pane-b.flush { padding: 0; }
+
+        /* ── 資料表:沒有斑馬紋。狀態靠左緣龍骨 + 文字晶片,
+              舊版的斑馬紋權重贏過缺料紅底,實測一半的缺料列失去紅色警示 ── */
+        table { border-collapse: separate; border-spacing: 0; width: 100%;
+                font-size: var(--t2); line-height: 1.45; background: var(--card); }
+        .table-scroll { overflow: auto; border-radius: var(--r-pane);
+                        border: 1px solid var(--line); box-shadow: var(--sh-1); margin-top: var(--s4); }
+        .table-scroll > table { margin: 0; }
+        .pane .table-scroll { border: none; border-radius: 0; box-shadow: none; margin: 0; }
+        th { position: sticky; top: 0; z-index: 2; background: var(--hull); color: var(--on-hull);
+             font-weight: 700; font-size: var(--t1); text-align: left;
+             padding: 9px var(--s3); white-space: nowrap; border-bottom: 1px solid var(--hull-3); }
+        td { padding: 9px var(--s3); border-bottom: 1px solid var(--line);
+             vertical-align: middle; word-break: keep-all; overflow-wrap: anywhere; }
         tr:last-child td { border-bottom: none; }
-        tbody tr:nth-child(even) td { background: #f7f9fd; }
-        tr:not(.low-stock):hover td { background: #eef4fd; }
-        /* 操作欄:橫排不斷字(否則整列被撐高、按鈕被擠成兩行),
-           並釘在表格右緣——12 欄橫向捲動時,最常用的那一欄不該被推出畫面 */
+        tbody tr:hover td { background: var(--wash); }
+        th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        td a.plain, td a { color: var(--transit-text); text-decoration: none; }
+        td a:hover { text-decoration: underline; }
+        /* 左緣龍骨:狀態一律看得到,不會被任何底色蓋掉 */
+        td.keel { box-shadow: inset 4px 0 0 var(--line-2); }
+        tr.low-stock td:first-child { box-shadow: inset 4px 0 0 var(--fault); }
+        tr.low-stock td { background: var(--fault-soft); }
+        tr.lot-empty td { color: var(--mute); }
+        tr.has-diff td { background: var(--amber-soft); }
+        td[id^="qty-"] { font-family: var(--font-code); font-variant-numeric: tabular-nums;
+                         font-weight: 700; font-size: var(--t3); color: var(--text); }
+        td[data-label="SKU"], td[data-label="料號"], td[data-label="儲位"],
+        td[data-label="批號"], td[data-label="單位"], .loc-cell {
+            font-family: var(--font-code); white-space: nowrap; }
+        .loc-cell { font-size: var(--t2); color: var(--mute); }
+        td[data-label="名稱"] { min-width: 190px; }
+        /* 短欄位不換行,列高才穩定;只有品名該吃掉剩餘寬度。
+           舊版分類欄會把「AC Adapter」斷成兩行,列高從 40px 變 90px */
+        td[data-label="分類"], td[data-label="供應商"], td[data-label="別名料號"],
+        td[data-label="狀態"], td[data-label="時間(台灣)"], td[data-label="批號"] {
+            white-space: nowrap; text-overflow: ellipsis; overflow: hidden; max-width: 160px; }
+        /* 操作欄:橫排不斷字,並釘在表格右緣——橫捲時最常用的那欄不該被推出畫面 */
         td[data-label="操作"], th:last-child { white-space: nowrap; }
-        td[data-label="操作"] > * { vertical-align: middle; }
-        td[data-label="操作"] a.plain { margin-right: 9px; font-weight: 600; }
+        td[data-label="操作"] a.plain { margin-right: var(--s2); font-weight: 700; }
         .table-scroll td[data-label="操作"], .table-scroll th:last-child {
             position: sticky; right: 0; z-index: 1;
-            box-shadow: -8px 0 10px -8px rgba(23,34,59,.18); }
+            box-shadow: -8px 0 10px -8px rgba(15,27,46,.18); }
         .table-scroll td[data-label="操作"] { background: var(--card); }
-        .table-scroll tbody tr:nth-child(even) td[data-label="操作"] { background: #f7f9fd; }
-        .table-scroll tr.low-stock td[data-label="操作"] { background: #fdf1f1; }
-        .table-scroll th:last-child { background: var(--ink); z-index: 3; }
-        /* 短欄位不換行,列高才穩定;名稱是唯一該吃掉剩餘寬度的欄 */
-        td[data-label="SKU"], td[data-label="儲位"], td[data-label="單位"] { white-space: nowrap; }
-        td[data-label="名稱"] { min-width: 190px; }
-        td[id^="qty-"] { font-weight: 800; font-size: 16.5px; color: #0f172a; letter-spacing: -.01em; }
-        th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
-        tr.low-stock td, tr.low-stock:hover td { background: #fdf1f1; }
-        tr.low-stock td:first-child { box-shadow: inset 3px 0 0 var(--red); }
-        tr.lot-empty td { color: #94a3b8; }
-        .badge-low { display: inline-block; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 700;
-                     padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
-        .msg { padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 14px; }
-        .msg.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-        .msg.ok { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-        .banner { background: #fffbeb; border: 1px solid #fde68a; border-left: 5px solid var(--accent);
-                  color: #92400e; padding: 11px 14px; border-radius: 10px; margin-bottom: 14px; font-weight: 600; }
-        .banner a { display: inline-block; padding: 4px 0; }
-        .note { color: #64748b; font-size: 13px; }
-        .pager { margin-top: 14px; font-size: 14px; }
-        /* 第五階段:盤點、預留、規劃、標籤 */
-        .loc-cell { font-family: ui-monospace, monospace; font-size: 13px; color: #334155; white-space: nowrap; }
-        .resv-note { font-size: 11px; color: #b45309; font-weight: 600; white-space: nowrap; }
-        .chip-open { background: #fef3c7; color: #92400e; font-size: 12px; font-weight: 700;
-                     padding: 2px 9px; border-radius: 999px; }
-        .chip-posted { background: #dcfce7; color: #15803d; font-size: 12px; font-weight: 700;
-                       padding: 2px 9px; border-radius: 999px; }
-        .chip-void { background: #e2e8f0; color: #475569; font-size: 12px; font-weight: 700;
-                     padding: 2px 9px; border-radius: 999px; }
-        /* 採購狀態:每個階段一個顏色,列表與流程圖共用同一組語意 */
-        .chip-po { display: inline-block; font-size: 12px; font-weight: 700;
-                   padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
-        .chip-ordered   { background: #e8eefb; color: #1d4ed8; }
-        .chip-shipped   { background: #e6f2fb; color: #0369a1; }
-        .chip-arrived   { background: #fdf0e3; color: #b45309; }
-        .chip-closed    { background: #e7f5ec; color: var(--green); }
-        .chip-cancelled { background: #e2e8f0; color: #475569; }
-        /* 採購三階段的入口卡:數字大、可點,直接帶到該狀態的清單 */
-        .po-flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                   gap: 12px; margin: 16px 0 8px; }
-        .po-step { display: flex; flex-direction: column; gap: 3px; text-decoration: none;
-                   background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--blue);
-                   border-radius: var(--r-md); padding: 14px 16px; color: var(--text);
-                   box-shadow: var(--sh-1);
-                   transition: transform .16s var(--ease), box-shadow .16s var(--ease); }
-        .po-step:hover { transform: translateY(-2px); box-shadow: var(--sh-2); }
-        .po-step.po-shipped { border-top-color: #0369a1; }
-        .po-step.po-arrived { border-top-color: #b45309; }
-        .po-step-label { font-size: 12.5px; font-weight: 700; color: var(--mute); letter-spacing: .04em; }
-        .po-step-n { font-size: 27px; font-weight: 800; letter-spacing: -.02em;
-                     font-variant-numeric: tabular-nums; line-height: 1.15; }
-        .po-step-n small { font-size: 13px; font-weight: 600; color: var(--mute); margin-left: 2px; }
-        .po-step-sub { font-size: 12.5px; color: var(--mute); }
-        /* 單張訂單的流程軌:走到哪一步一目了然 */
-        .po-track { display: flex; align-items: center; gap: 0; margin: 18px 0 6px; flex-wrap: wrap; }
-        .po-node { display: flex; align-items: center; gap: 7px; flex: 1 1 auto; min-width: 108px; position: relative; }
-        .po-node + .po-node::before { content: ""; flex: 1 1 auto; height: 2px; background: var(--line); margin-right: 7px; }
-        .po-node.done + .po-node.done::before, .po-node.now::before { background: var(--accent); }
-        .po-dot { width: 13px; height: 13px; border-radius: 50%; background: var(--line);
-                  border: 2px solid var(--card); box-shadow: 0 0 0 2px var(--line); flex-shrink: 0; }
-        .po-node.done .po-dot { background: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
-        .po-node.now .po-dot { box-shadow: 0 0 0 4px rgba(245,163,26,.35); }
-        .po-node-label { font-size: 13px; color: var(--mute); white-space: nowrap; }
-        .po-node.done .po-node-label { color: var(--text); font-weight: 600; }
-        /* 狀態篩選膠囊 */
-        .chip-link { display: inline-block; padding: 5px 13px; border-radius: 999px;
-                     border: 1px solid var(--line); background: var(--card); color: var(--text);
-                     text-decoration: none; font-size: 13px; font-weight: 600;
-                     transition: border-color .15s var(--ease), background .15s var(--ease); }
-        .chip-link:hover { border-color: var(--accent); background: #fff8ea; }
-        .chip-link.on { background: var(--ink); color: #fff; border-color: var(--ink); }
-        .onorder-cell { color: #b45309; font-weight: 700; }
-        /* 首頁的採購帶要壓縮:主角是下方的庫存表,別把它推到看不見 */
-        .po-home { margin-top: 18px; padding-top: 12px; }
-        .po-home h2 { font-size: 14px; margin-bottom: 8px; }
-        .po-home .po-flow { margin: 0; gap: 10px; }
-        .po-home .po-step { flex-direction: row; align-items: baseline; gap: 8px;
-                            padding: 9px 14px; border-top-width: 3px; }
-        .po-home .po-step-label { font-size: 13px; color: var(--text); }
-        .po-home .po-step-n { font-size: 20px; }
-        .po-home .po-step-n small { font-size: 11.5px; }
-        .po-home .po-step-sub { font-size: 12px; margin-left: auto; text-align: right; }
-        label.chk { display: inline-flex; align-items: center; gap: 4px; margin-top: 0;
-                    font-size: 12px; font-weight: 600; color: var(--mute); white-space: nowrap; }
-        label.chk input { width: auto; margin: 0; }
-        tr.has-diff td { background: #fffbeb; }
-        @media (prefers-color-scheme: dark) {
-            .loc-cell { color: #cbd5e1; }
-            .stat-box { background: #1e293b; border-color: #334155; }
-            .stat-num { color: #f1f5f9; }
-            .stat-cap { color: #94a3b8; }
-            tr.has-diff td { background: #292417; }
-            .label, .qr-img { background: #fff; }
-        }
-        .stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 18px; }
-        /* KPI 色塊:每張卡輪流帶一個識別色的粗頂邊,擺脫整排灰盒 */
-        .stat-box { flex: 1 1 130px; background: #f8fafc; border: 1px solid var(--line); border-top: 4px solid var(--blue);
-                    border-radius: 10px; padding: 12px 16px; }
-        .stat-row .stat-box:nth-child(4n+2) { border-top-color: var(--green); }
-        .stat-row .stat-box:nth-child(4n+3) { border-top-color: var(--accent); }
-        .stat-row .stat-box:nth-child(4n)   { border-top-color: var(--violet); }
-        .stat-num { font-size: 27px; font-weight: 800; font-variant-numeric: tabular-nums;
-                    letter-spacing: -.02em; color: #0f172a; }
-        .stat-cap { font-size: 12.5px; color: var(--mute); margin-top: 2px; }
-        .count-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-        .count-input { width: 90px !important; margin-top: 0 !important; text-align: right; }
-        .count-note { width: 130px !important; margin-top: 0 !important; font-size: 13px; }
-        .qr-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 16px 0 4px; }
-        .qr-img { width: 120px; height: 120px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
-        .qr-cap { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
-        .label-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
-        .label { display: flex; gap: 10px; align-items: center; border: 1px solid #cbd5e1;
-                 border-radius: 8px; padding: 10px; background: #fff; break-inside: avoid; }
+        .table-scroll tr.low-stock td[data-label="操作"] { background: var(--fault-soft); }
+        .table-scroll th:last-child { background: var(--hull); z-index: 3; }
+        tfoot td { background: var(--wash); font-weight: 700; border-top: 2px solid var(--hull); }
+
+        /* ── 狀態晶片:方角(工業儀表語彙),永遠帶文字 ── */
+        .chip, .badge-low, .chip-open, .chip-posted, .chip-void, .chip-po, .chip-link {
+            display: inline-block; font-size: var(--t1); font-weight: 700;
+            padding: 2px 7px; border-radius: var(--r-ctl); white-space: nowrap;
+            border: 1px solid transparent; }
+        .chip.act, .chip-open, .chip-arrived { background: var(--amber-soft);
+            color: var(--amber-text); border-color: var(--amber-edge); }
+        .chip.info, .chip-ordered, .chip-shipped { background: var(--transit-soft);
+            color: var(--transit-text); border-color: var(--transit-edge); }
+        .chip.ok, .chip-posted, .chip-closed { background: var(--onhand-soft);
+            color: var(--onhand-text); border-color: var(--onhand-edge); }
+        .chip.held { background: var(--held-soft); color: var(--held-text); border-color: var(--held-edge); }
+        .chip.bad, .badge-low { background: var(--fault-soft); color: var(--fault-text); border-color: var(--fault-edge); }
+        .chip.expired { background: var(--hatch); color: var(--fault-text); border-color: var(--fault-edge); }
+        .chip.off, .chip-void, .chip-cancelled { background: var(--wash);
+            color: var(--mute); border-color: var(--line); }
+        .badge-low { margin-left: var(--s1); }
+        .chip-link { border-color: var(--line); background: var(--card); color: var(--text);
+                     text-decoration: none; padding: 5px var(--s3); font-size: var(--t2); }
+        .chip-link:hover { border-color: var(--amber); background: var(--amber-soft); }
+        .chip-link.on { background: var(--hull); color: #fff; border-color: var(--hull); }
+        .resv-note { font-size: var(--t1); color: var(--held-text); font-weight: 700; white-space: nowrap; }
+        .onorder-cell { color: var(--transit-text); font-weight: 700; }
+        .alias-cell { font-size: var(--t1); color: var(--mute); }
+
+        /* ── 訊息 ── */
+        .msg { padding: 11px var(--s4); border-radius: var(--r-ctl); margin-bottom: var(--s4);
+               font-size: var(--t2); border: 1px solid transparent; border-left-width: 4px; }
+        .msg.error { background: var(--fault-soft); color: var(--fault-text); border-color: var(--fault); }
+        .msg.ok { background: var(--onhand-soft); color: var(--onhand-text); border-color: var(--onhand); }
+        .banner { background: var(--amber-soft); color: var(--amber-text);
+                  border: 1px solid var(--amber-edge); border-left: 4px solid var(--amber);
+                  padding: 11px var(--s4); border-radius: var(--r-ctl);
+                  margin-bottom: var(--s4); font-weight: 700; font-size: var(--t2); }
+        .banner a { color: var(--amber-text); }
+        .note, .sub-links { color: var(--mute); font-size: var(--t2); }
+        .pager { margin-top: var(--s4); font-size: var(--t2); }
+        .pager .page-no { color: var(--mute); }
+        a.plain { color: var(--transit-text); text-decoration: none; }
+        a.plain:hover { text-decoration: underline; }
+
+        /* ── 按鈕:實心琥珀 = 這一頁唯一的主要動作 ── */
+        input[type=submit], button, .btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: var(--s2);
+            min-height: 40px; padding: 0 var(--s5); margin-top: var(--s4);
+            font: inherit; font-size: var(--t3); font-weight: 700;
+            color: var(--amber-on); background: var(--amber); border: 1px solid var(--amber-line);
+            border-radius: var(--r-ctl); cursor: pointer; text-decoration: none;
+            box-shadow: 0 1px 0 rgba(0,0,0,.10), inset 0 1px 0 rgba(255,255,255,.35);
+            transition: background .14s var(--ease), box-shadow .14s var(--ease),
+                        transform .08s var(--ease); }
+        input[type=submit]:hover, button:hover, .btn:hover { background: var(--amber-hi); }
+        input[type=submit]:active, button:active, .btn:active {
+            transform: translateY(1px);
+            box-shadow: inset 0 2px 3px rgba(90,52,0,.28); }
+        /* 焦點框:深藏青對琥珀 8.6:1、對白 16.6:1,遠高於 3:1 門檻(舊版只有 1.44:1) */
+        input[type=submit]:focus-visible, button:focus-visible, .btn:focus-visible,
+        a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+            outline: 3px solid var(--hull); outline-offset: 2px; }
+        .topbar :focus-visible, nav :focus-visible { outline-color: var(--amber); }
+        .btn.ghost { background: var(--card); color: var(--text); border-color: var(--line-str);
+                     box-shadow: none; font-weight: 400; }
+        .btn.ghost:hover { background: var(--wash); border-color: var(--hull-3); }
+        .btn.sm { min-height: 30px; padding: 0 var(--s3); font-size: var(--t2); margin-top: 0; }
+        .btnrow { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin-top: var(--s4); }
+        .btnrow .btn, .btnrow input[type=submit], .btnrow button { margin-top: 0; }
+        /* 次要動作:表格內的小按鈕。預設中性,危險動作才變紅 */
+        .small-btn { display: inline-flex; align-items: center; justify-content: center;
+                     min-height: 30px; padding: 0 11px; margin: 0;
+                     font: inherit; font-size: var(--t2); font-weight: 700; cursor: pointer;
+                     color: var(--fault-text); background: var(--card);
+                     border: 1px solid var(--fault-edge); border-radius: var(--r-ctl); box-shadow: none;
+                     transition: background .15s var(--ease), border-color .15s var(--ease); }
+        .small-btn:hover { background: var(--fault-soft); border-color: var(--fault); }
+        .small-btn:active { transform: none; background: var(--fault-soft); }
+        .small-btn.ok-btn { color: var(--transit-text); border-color: var(--transit-edge); }
+        .small-btn.ok-btn:hover { background: var(--transit-soft); border-color: var(--transit); }
+        .small-btn.icon-btn { width: 32px; height: 32px; min-height: 32px; padding: 0; }
+        .small-btn.icon-btn svg { width: 16px; height: 16px; display: block; }
+
+        /* ── 表單:欄寬暗示輸入長度 ── */
+        label { display: block; margin-top: var(--s4); font-weight: 700;
+                font-size: var(--t2); color: var(--text); }
+        label .opt { color: var(--mute); font-weight: 400; }
+        label .req { color: var(--fault-text); font-weight: 700; }
+        .field-help { font-size: var(--t2); color: var(--mute); margin: 2px 0 0; font-weight: 400; }
+        input[type=text], input[type=password], input[type=number], input[type=date],
+        input[type=search], select {
+            width: 100%; max-width: 460px; height: 42px; padding: 0 var(--s3);
+            margin-top: var(--s1); font: inherit; font-size: 16px; color: var(--text);
+            background: var(--card); border: 1px solid var(--line-str); border-radius: var(--r-ctl); }
+        input.w-qty { max-width: 200px; text-align: right; font-family: var(--font-code); }
+        input.w-code { max-width: 320px; font-family: var(--font-code); }
+        /* 焦點框不是語意色:它的職責是對所在底色最大對比。淺色面用藏青(對白 16.6:1),
+           深色面(頂列)才用琥珀。舊版焦點框只有 1.44:1 */
+        input:focus, select:focus { outline: 3px solid var(--hull); outline-offset: 0;
+                                     border-color: var(--hull); }
+        input[type=file] { margin-top: var(--s2); font-size: var(--t2); }
+        .filters { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; margin: var(--s2) 0; }
+        .filters input, .filters select { width: auto; margin-top: 0; height: 38px; }
+        .filters input[type=submit] { margin-top: 0; min-height: 38px; padding: 0 var(--s4); }
+        label.chk { display: inline-flex; align-items: center; gap: var(--s1); margin-top: 0;
+                    font-size: var(--t2); font-weight: 400; color: var(--mute); white-space: nowrap; }
+        label.chk input { width: auto; height: auto; margin: 0; }
+        .count-form { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+        .count-input { width: 104px !important; max-width: 104px !important; margin-top: 0 !important;
+                       height: 38px; text-align: right; font-family: var(--font-code); }
+        .count-note { width: 150px !important; max-width: 150px !important; margin-top: 0 !important;
+                      height: 38px; font-size: var(--t2); }
+
+        /* ── 選料元件(第 2 批):取代 2,281 項的下拉選單 ── */
+        .picklist { display: flex; flex-direction: column; gap: var(--s2); }
+        .pickrow { display: flex; align-items: center; gap: var(--s3); padding: 10px var(--s3);
+                   background: var(--card); border: 1px solid var(--line);
+                   border-radius: var(--r-ctl); text-decoration: none; color: var(--text);
+                   min-height: 52px; }
+        .pickrow:hover { border-color: var(--amber); background: var(--amber-soft); }
+        .pickrow .sku { font-family: var(--font-code); font-size: var(--t2);
+                        color: var(--mute); white-space: nowrap; min-width: 132px; }
+        .pickrow .nm { font-weight: 700; font-size: var(--t3); flex: 1 1 auto; min-width: 0; }
+        .pickrow .loc { font-family: var(--font-code); font-size: var(--t2); background: var(--wash);
+                        padding: 2px var(--s2); border-radius: var(--r-ctl); white-space: nowrap; }
+        .pickrow .pq { font-family: var(--font-code); font-weight: 700; font-size: var(--t3);
+                       white-space: nowrap; min-width: 96px; text-align: right; }
+        /* 料件確認卡:第二步永遠知道自己在登記哪一項 */
+        .pickcard { display: flex; gap: var(--s4); align-items: center; flex-wrap: wrap;
+                    background: var(--hull); color: var(--on-hull);
+                    border-radius: var(--r-pane); padding: var(--s4); margin-bottom: var(--s4); }
+        .pickcard .nm { font-size: var(--t4); font-weight: 700; line-height: 1.4; }
+        .pickcard .meta { font-size: var(--t2); color: var(--on-hull-2); font-family: var(--font-code); }
+        .pickcard .right { margin-left: auto; text-align: right; }
+        .pickcard .big { font-family: var(--font-code); font-size: var(--t6);
+                         font-weight: 700; line-height: 1.15; }
+        .pickcard a { color: var(--amber); }
+
+        /* ── KPI 區塊 ── */
+        .stat-row { display: flex; flex-wrap: wrap; gap: var(--s3); margin: var(--s4) 0 var(--s5); }
+        /* 預設中性。舊版依 nth-child 輪流換色——顏色由「排第幾個」決定而不是由意思決定,
+           等於顏色不傳遞任何資訊。要語意色請由樣板指定 .stat-box.good/.warn/.bad/.info */
+        .stat-box { flex: 1 1 150px; background: var(--card); border: 1px solid var(--line);
+                    border-top: 4px solid var(--line-2); border-radius: var(--r-pane);
+                    padding: var(--s3) var(--s4); box-shadow: var(--sh-1); }
+        .stat-box.good { border-top-color: var(--onhand); }
+        .stat-box.info { border-top-color: var(--transit); }
+        .stat-box.warn { border-top-color: var(--amber); }
+        .stat-box.bad  { border-top-color: var(--fault); }
+        .stat-box.held { border-top-color: var(--held); }
+        .stat-num { font-size: var(--t6); font-weight: 700; font-family: var(--font-code);
+                    font-variant-numeric: tabular-nums; line-height: 1.15; color: var(--text); }
+        .stat-cap { font-size: var(--t2); color: var(--mute); }
+
+        /* ── 採購狀態軌與入口卡 ── */
+        .po-flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+                   gap: var(--s3); margin: var(--s4) 0 var(--s2); }
+        .po-step { display: flex; flex-direction: column; gap: 2px; text-decoration: none;
+                   background: var(--card); border: 1px solid var(--line);
+                   border-left: 4px solid var(--transit); border-radius: var(--r-pane);
+                   padding: var(--s3) var(--s4); color: var(--text); box-shadow: var(--sh-1);
+                   transition: box-shadow .16s var(--ease), transform .16s var(--ease); }
+        .po-step:hover { transform: translateY(-1px); box-shadow: var(--sh-2); }
+        .po-step.po-shipped { border-left-color: var(--transit-text); }
+        .po-step.po-arrived { border-left-color: var(--amber); }
+        .po-step-label { font-size: var(--t2); font-weight: 700; color: var(--mute); }
+        .po-step-n { font-size: 28px; font-weight: 700; font-family: var(--font-code);
+                     font-variant-numeric: tabular-nums; line-height: 1.2; }
+        .po-step-n small { font-size: var(--t2); font-weight: 400; color: var(--mute); margin-left: 2px; }
+        .po-step-sub { font-size: var(--t2); color: var(--mute); }
+        .po-home { margin-top: var(--s5); }
+        .po-home .po-flow { margin: 0; }
+        .po-home .po-step { flex-direction: row; align-items: baseline; gap: var(--s2);
+                            padding: var(--s2) var(--s4); }
+        .po-home .po-step-label { color: var(--text); }
+        .po-home .po-step-n { font-size: var(--t5); }
+        .po-home .po-step-sub { margin-left: auto; text-align: right; }
+        .po-track { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; margin: var(--s4) 0; }
+        .po-node { padding: var(--s3); background: var(--card); border: 1px solid var(--line);
+                   text-align: center; }
+        .po-node:first-child { border-radius: var(--r-pane) 0 0 var(--r-pane); }
+        .po-node:last-child { border-radius: 0 var(--r-pane) var(--r-pane) 0; }
+        .po-node-label { font-size: var(--t2); font-weight: 700; color: var(--mute); }
+        .po-node.done { background: var(--hull); color: #fff; border-color: var(--hull); }
+        .po-node.done .po-node-label { color: #fff; }
+        .po-node.now { background: var(--amber); border-color: var(--amber-line); }
+        .po-node.now .po-node-label { color: var(--amber-on); }
+        .po-dot { display: none; }
+
+        /* ── 其他 ── */
+        .detail-section { margin-top: var(--s6); border-top: 1px solid var(--line); padding-top: var(--s4); }
+        .import-help { background: var(--wash); border: 1px solid var(--line);
+                       padding: var(--s3) var(--s4); border-radius: var(--r-pane);
+                       font-size: var(--t2); color: var(--text); }
+        .import-help code { background: var(--card); padding: 1px 6px; border-radius: 3px;
+                            font-family: var(--font-code); }
+        .hero-search { display: flex; flex-wrap: wrap; gap: var(--s2); margin: var(--s1) 0; }
+        .hero-search .search-field { position: relative; flex: 1 1 260px; display: flex; }
+        .hero-search .search-field svg { position: absolute; left: 14px; top: 50%;
+             transform: translateY(-50%); width: 18px; height: 18px; color: var(--line-str); }
+        .hero-search input[type=text] { flex: 1 1 auto; max-width: none; margin-top: 0;
+             padding-left: 42px; }
+        .hero-search select { width: auto; margin-top: 0; }
+        .hero-search input[type=submit] { margin-top: 0; }
+        .photo-wall { display: flex; flex-wrap: wrap; gap: var(--s3); margin: var(--s3) 0; }
+        .photo-wall .photo-item { text-align: center; }
+        .photo-wall img, img.thumb { max-width: 150px; max-height: 150px;
+             border: 1px solid var(--line); border-radius: var(--r-pane); display: block; }
+        .photo-wall .photo-item form { margin-top: var(--s1); }
+        .qr-row { display: flex; gap: var(--s4); align-items: center; flex-wrap: wrap; margin: var(--s4) 0; }
+        .qr-img { width: 120px; height: 120px; border: 1px solid var(--line);
+                  border-radius: var(--r-pane); background: var(--white); }
+        .qr-cap { font-weight: 700; font-size: var(--t2); }
+        .label-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+                       gap: var(--s2); }
+        .label { display: flex; gap: var(--s3); align-items: center; border: 1px solid var(--line-str);
+                 border-radius: var(--r-ctl); padding: var(--s3); background: var(--white);
+                 break-inside: avoid; color: var(--print-ink); }
         .label img { width: 84px; height: 84px; flex-shrink: 0; }
         .label-text { min-width: 0; }
-        .label-sku { font-family: ui-monospace, monospace; font-weight: 700; font-size: 14px; }
-        .label-name { font-size: 13px; margin: 1px 0; word-break: break-word; }
-        .label-loc { font-size: 12px; color: #475569; }
-        @media print {
-            nav, footer, .no-print, .filters, form { display: none !important; }
-            .container { box-shadow: none; border: none; margin: 0; padding: 0; max-width: none; }
-            body { background: #fff; }
-            .label { border-color: #999; }
-        }
-        .pager .page-no { color: #64748b; }
-        form.inline { display: inline; }
-        label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; color: #334155; }
-        input[type=text], input[type=password], input[type=number], input[type=date], select {
-            width: 100%; max-width: 420px; padding: 9px 11px; margin-top: 5px; font-size: 16px;
-            border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
-        input:focus, select:focus { outline: 2px solid #fcd34d; border-color: var(--accent-deep); }
-        input[type=file] { margin-top: 6px; font-size: 14px; }
-        /* 主按鈕:琥珀主色 + 上緣內光與下緣暗邊,讓它看起來是「可以按下去」的實體 */
-        input[type=submit], button {
-            display: block; padding: 11px 24px; margin-top: 16px;
-            font: inherit; font-size: 15px; font-weight: 700; letter-spacing: .02em;
-            color: var(--accent-ink); border: none; border-radius: var(--r-sm); cursor: pointer;
-            background: linear-gradient(180deg, #ffb43a 0%, var(--accent) 55%, var(--accent-deep) 100%);
-            box-shadow: var(--sh-accent), inset 0 1px 0 rgba(255,255,255,.45);
-            transition: transform .12s var(--ease), box-shadow .18s var(--ease), filter .18s var(--ease); }
-        input[type=submit]:hover, button:hover {
-            filter: brightness(1.04);
-            box-shadow: 0 2px 4px rgba(146,64,14,.22), 0 6px 16px rgba(245,163,26,.34),
-                        inset 0 1px 0 rgba(255,255,255,.5); }
-        input[type=submit]:active, button:active {
-            transform: translateY(1px);
-            box-shadow: 0 1px 2px rgba(146,64,14,.28), inset 0 1px 2px rgba(146,64,14,.25); }
-        input[type=submit]:focus-visible, button:focus-visible,
-        a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
-            outline: 3px solid rgba(245,163,26,.55); outline-offset: 2px; }
-        /* 次要動作:表格內的小按鈕。預設中性,危險動作才變紅 */
-        .small-btn { display: inline-block; padding: 5px 11px; margin: 0;
-                     font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
-                     color: var(--red); background: var(--card); border: 1px solid var(--line);
-                     border-radius: var(--r-sm); box-shadow: none;
-                     transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease); }
-        .small-btn:hover { background: #fef2f2; color: var(--red); border-color: #f2a9a9; }
-        .small-btn:active { transform: none; background: #fde8e8; }
-        /* 盤點的「記錄」、收貨的「核對」是儲存動作,不該長得像刪除 */
-        .small-btn.ok-btn { color: var(--blue); border-color: #bcd2f8; background: var(--card); }
-        .small-btn.ok-btn:hover { background: #eef4ff; color: #1d4ed8; border-color: #7aa5f0; }
-        /* 圖示鈕:只放圖示,靠 title/aria-label 說明,列表才擠得下 */
-        .small-btn.icon-btn { display: inline-grid; place-items: center; width: 30px; height: 30px;
-                              padding: 0; vertical-align: middle; }
-        .small-btn.icon-btn svg { width: 16px; height: 16px; display: block; }
-        .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 4px; }
-        .filters input, .filters select { width: auto; margin-top: 0; }
-        .filters input[type=submit] { margin-top: 0; padding: 9px 16px; }
-        footer { text-align: center; color: #94a3b8; padding: 16px; font-size: 12px; }
-        a.plain { color: #2563eb; text-decoration: none; }
-        a.plain:hover { text-decoration: underline; }
-        .alias-cell { font-size: 12px; color: #475569; }
-        .photo-wall { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
-        .photo-wall .photo-item { text-align: center; }
-        .photo-wall img, img.thumb { max-width: 150px; max-height: 150px; border: 1px solid #e2e8f0;
-                                     border-radius: 10px; display: block; }
-        .photo-wall .photo-item form { margin-top: 4px; }
-        .detail-section { margin-top: 26px; border-top: 1px solid #eef2f6; padding-top: 16px; }
-        .import-help { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px 16px;
-                       border-radius: 10px; font-size: 13px; color: #334155; }
-        .import-help code { background: #eef2f6; padding: 1px 6px; border-radius: 5px; }
-        /* 搜尋是這個系統最常被按的控件,給它最大的視覺份量 */
-        .hero-search { display: flex; flex-wrap: wrap; gap: 9px; margin: 4px 0 4px; }
-        .hero-search .search-field { position: relative; flex: 1 1 260px; display: flex; }
-        .hero-search .search-field svg { position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
-                                         width: 19px; height: 19px; color: #94a2bd; pointer-events: none;
-                                         transition: color .16s var(--ease); }
-        .hero-search .search-field:focus-within svg { color: var(--accent-deep); }
-        .hero-search input[type=text] { flex: 1 1 auto; max-width: none; margin-top: 0;
-                                        padding: 13px 16px 13px 44px; font-size: 16px;
-                                        border-radius: var(--r-md); box-shadow: var(--sh-1); }
-        .hero-search select { width: auto; margin-top: 0; border-radius: var(--r-md);
-                              padding: 13px 14px; box-shadow: var(--sh-1); }
-        .hero-search input[type=submit] { margin-top: 0; padding: 13px 26px; border-radius: var(--r-md); }
-        .sub-links { margin: 0 0 14px; font-size: 13px; color: #94a3b8; }
-        /* 快速動作:圖示放在有色圓角方塊裡,滑過時整張卡浮起。
-           圖示一律用線條 SVG 而非 emoji——emoji 在不同系統長相不一,也不能跟著配色走 */
-        .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-                         gap: 10px; margin: 4px 0 20px; }
-        .quick-actions a {
-            display: flex; flex-direction: column; align-items: center; gap: 9px;
-            background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
-            padding: 15px 8px 13px; text-decoration: none; color: var(--text);
-            font-size: 13.5px; font-weight: 600; box-shadow: var(--sh-1);
-            transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
-        .quick-actions a:hover { transform: translateY(-2px); box-shadow: var(--sh-2); border-color: #c8d2e2; }
-        .quick-actions a:active { transform: translateY(0); box-shadow: var(--sh-1); }
-        .qa-icon { display: grid; place-items: center; width: 38px; height: 38px;
-                   border-radius: 10px; background: #eef2f8; color: #46557a; flex-shrink: 0;
-                   transition: background .16s var(--ease), color .16s var(--ease); }
-        .qa-icon svg { width: 20px; height: 20px; display: block; }
-        .quick-actions a:hover .qa-icon { background: var(--ink); color: var(--accent); }
-        /* 進出庫是最常按的兩個,給它們自己的語意色 */
-        .qa-in  { background: #e7f5ec; color: var(--green); }
-        .qa-out { background: #fdf0e3; color: #b45309; }
-        .quick-actions a:hover .qa-in  { background: var(--green); color: #fff; }
-        .quick-actions a:hover .qa-out { background: #b45309; color: #fff; }
-        .action-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
-        .action-links a { display: inline-block; padding: 9px 14px; border: 1px solid #cbd5e1; border-radius: 8px;
-                          text-decoration: none; color: #1e293b; font-weight: 600; font-size: 14px; }
-        .action-links a:hover { border-color: #93c5fd; background: #eff6ff; }
-        .action-links a.primary { border-color: #93c5fd; color: #1d4ed8; }
+        .label-sku { font-family: var(--font-code); font-weight: 700; font-size: var(--t2); }
+        .label-name { font-size: var(--t2); margin: 1px 0; word-break: break-word; }
+        .label-loc { font-size: var(--t1); color: var(--print-mute); }
         .auth-box { max-width: 380px; margin: 0 auto; }
         .container:has(.auth-box) { max-width: 440px; margin-top: 9vh; }
-        /* 純表單頁(入出庫、新增商品、匯入…)不需要資料表那麼寬,收窄避免右側大片留白。
-           首頁的搜尋列與歷史頁的篩選列不算,它們所在的頁面要維持寬版 */
-        .container:has(> form:not(.filters):not(.hero-search):not(.inline)) { max-width: 760px; }
+        form.inline { display: inline; }
+        /* 頁尾:版本號存在的唯一目的就是讓人辨識版本,舊版對比只有 2.18:1 */
+        footer { text-align: center; color: var(--mute); padding: var(--s5) var(--s4);
+                 font-size: var(--t2); }
+        footer .ver { font-family: var(--font-code); color: var(--text); }
+
+        @media print {
+            .topbar, nav, footer, .no-print, .filters, form { display: none !important; }
+            .container { max-width: none; margin: 0; padding: 0; }
+            .pane { box-shadow: none; border: none; }
+            .pane-h { background: var(--white); color: #000; border-bottom: 2px solid #000; }
+            th { background: var(--white); color: #000; border-bottom: 2px solid #000; }
+            body { background: var(--white); }
+            .label { border-color: #999; }
+        }
+
         @media (max-width: 760px) {
-            .container { margin: 10px; padding: 16px 14px 20px; border-radius: 12px; }
-            /* 手機:群組選單展開時改為推開內容(不浮動),仍是零 JS 的 details */
-            nav { flex-wrap: wrap; position: static; padding: 2px 10px 6px; align-items: flex-start; }
-            nav .brand { padding: 10px 8px 8px 0; }
-            nav > a.top, nav summary { padding: 10px 9px; height: auto; }
+            .container { margin: var(--s3) auto; padding: 0 var(--s3); }
+            .topbar { height: 48px; padding: 0 var(--s3); gap: var(--s2); }
+            .topbar .brand span { display: none; }
+            nav { position: static; overflow-x: auto; padding: 0 var(--s3);
+                  scrollbar-width: none; }
             nav details.menu { position: static; }
-            /* 展開的群組獨占一列,把後面的項目往下推,不撐爆同列鄰居 */
             nav details.menu[open] { flex-basis: 100%; }
-            nav .menu-panel { position: static; border-radius: 10px; margin: 2px 0 6px;
-                              box-shadow: none; background: var(--ink-2); border-color: var(--ink-line); }
-            nav .menu-panel a { color: #dbe3f2; padding: 11px 14px; }
-            nav .menu-panel a:hover { background: var(--ink); color: #fff; }
-            nav .menu-panel a.active { background: rgba(245,163,26,.18); color: var(--accent); }
-            nav .user-info { flex-basis: 100%; padding: 2px 0 8px; }
-            /* 一般表格:tbody 撐滿寬度、必要時橫向捲動 */
+            nav .menu-panel { position: absolute; left: var(--s3); right: var(--s3); }
+            h1 { font-size: 20px; }
+            /* 一般表格:橫向捲動 */
             table { display: block; overflow-x: auto; }
             table:not(.cards) tbody { display: table; width: 100%; }
-            table:not(.cards) th { white-space: nowrap; }
-            /* 卡片式表格:名稱當標題、庫存緊隨,次要欄位縮小 */
+            /* 卡片式表格:名稱當標題、數量緊隨 */
             table.cards { display: block; overflow: visible; }
             table.cards tbody { display: block; width: 100%; }
             table.cards tr:first-child { display: none; }
-            table.cards tr { display: flex; flex-direction: column; border: 1px solid #e2e8f0; border-radius: 12px;
-                             margin-bottom: 10px; padding: 8px 14px; background: #fff; }
-            table.cards tr.low-stock { border-color: #fecaca; background: #fef2f2; }
+            table.cards tr { display: flex; flex-direction: column;
+                             border: 1px solid var(--line); border-left: 4px solid var(--line-2);
+                             border-radius: var(--r-ctl); margin-bottom: var(--s2);
+                             padding: var(--s2) var(--s3); background: var(--card); }
+            table.cards tr.low-stock { border-left-color: var(--fault); background: var(--fault-soft); }
             table.cards tr.low-stock td { background: transparent; }
-            table.cards td { display: flex; justify-content: space-between; align-items: center; gap: 12px;
-                             border: none; padding: 7px 0; text-align: right;
-                             border-bottom: 1px dashed #eef2f6; }
+            table.cards td { display: flex; justify-content: space-between; align-items: center;
+                             gap: var(--s3); border: none; box-shadow: none; padding: 6px 0;
+                             text-align: right; border-bottom: 1px dashed var(--line); }
             table.cards td:last-child { border-bottom: none; }
-            table.cards td::before { content: attr(data-label); font-weight: 600; color: #64748b;
-                                     font-size: 13px; text-align: left; flex-shrink: 0; }
+            table.cards td::before { content: attr(data-label); font-weight: 700;
+                                     color: var(--mute); font-size: var(--t2);
+                                     text-align: left; flex-shrink: 0; }
             table.cards td[data-label="名稱"] { order: -2; font-size: 17px; font-weight: 700;
                                                 justify-content: flex-start; text-align: left; }
             table.cards td[data-label="名稱"]::before { content: none; }
-            table.cards td[data-label="庫存"], table.cards td[data-label="目前庫存"] { order: -1; }
-            table.cards td[data-label="別名料號"], table.cards td[data-label="單價"],
-            table.cards td[data-label="低庫存門檻"] { font-size: 12px; color: #64748b; }
-            /* 觸控目標:操作連結與刪除鈕加大 */
-            table.cards td[data-label="操作"] a.plain { display: inline-block; padding: 8px 12px; }
-            .small-btn { min-height: 40px; padding: 8px 14px; font-size: 13px; border-color: #fca5a5; }
-            input[type=submit], button { min-height: 44px; }
-            .filters input[type=submit] { min-height: auto; }
-            /* 手機:搜尋是主要動作,按鈕拉滿版才好按,也不會孤零零貼在左邊 */
-            .hero-search { gap: 8px; }
+            table.cards td[data-label="庫存"], table.cards td[data-label="現貨"],
+            table.cards td[data-label="目前庫存"] { order: -1; }
+            table.cards td[data-label="操作"] a.plain { display: inline-block; padding: var(--s2) var(--s3); }
+            .small-btn { min-height: 44px; padding: 0 var(--s3); }
+            .small-btn.icon-btn { width: 44px; height: 44px; min-height: 44px; }
+            input[type=submit], button, .btn { min-height: 44px; }
+            .filters input[type=submit] { min-height: 38px; }
             .hero-search .search-field { flex-basis: 100%; }
-            .hero-search select { width: 100%; }
-            .hero-search input[type=submit] { width: 100%; min-height: 46px; }
-            /* 直式表單的主要送出鈕滿版好按(篩選列與搜尋列除外) */
+            .hero-search select, .hero-search input[type=submit] { width: 100%; }
             form:not(.filters):not(.hero-search):not(.inline) > input[type=submit] { width: 100%; }
-            /* 盤點與收貨的現場輸入:手機上整列堆疊,輸入框與按鈕都放大好按 */
-            table.cards td[data-label="實盤數"],
-            table.cards td[data-label="實收數"],
+            table.cards td[data-label="實盤數"], table.cards td[data-label="實收數"],
             table.cards td[data-label="對應商品"] { flex-direction: column; align-items: stretch;
-                                                     justify-content: flex-start; gap: 4px; }
-            table.cards td[data-label="實盤數"]::before,
-            table.cards td[data-label="實收數"]::before,
-            table.cards td[data-label="對應商品"]::before { margin-bottom: 6px; }
-            table.cards td[data-label="對應商品"] { text-align: left; }
-            table.cards td[data-label="對應商品"] .count-note { width: 100% !important; }
+                                                     justify-content: flex-start; gap: var(--s1); }
             .count-form { width: 100%; }
-            .count-input, .count-note { width: 100% !important; flex: 1 1 100%; }
-            .count-form .small-btn { width: 100%; margin-top: 4px; }
+            .count-input, .count-note { width: 100% !important; max-width: none !important; flex: 1 1 100%; }
+            .count-form .small-btn { width: 100%; margin-top: var(--s1); }
+            .pickrow { flex-wrap: wrap; min-height: 60px; }
+            .pickrow .sku { min-width: 0; flex-basis: 100%; }
+            .pickcard .right { margin-left: 0; text-align: left; }
         }
     </style>
 </head>
 <body>
     {% if session.get('user_id') %}
+    <header class="topbar">
+        <a class="brand" href="{{ url_for('index') }}" aria-label="庫存管理系統首頁"><span class="brand-mark"></span><span>庫存管理</span></a>
+        <form class="gsearch" role="search" action="{{ url_for('index') }}" method="get">
+            <label class="sr-only" for="gq">搜尋料號、品名、儲位或跨公司別名料號</label>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input id="gq" type="search" name="q" value="{{ request.args.get('q', '') if request.path == '/' else '' }}" placeholder="料號、品名、儲位、別名料號…掃碼槍可直接掃">
+        </form>
+        <span class="user-info">{{ session.get('username') }}{% if session.get('is_admin') %}(管理員){% endif %}&nbsp;·&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
+    </header>
     <nav>
-        <a class="brand" href="{{ url_for('index') }}"><span class="brand-mark"></span>庫存管理</a>
-        <a class="top{% if request.path == '/' %} active{% endif %}" href="{{ url_for('index') }}">庫存總覽</a>
+        <a class="top{% if request.path == '/' %} active{% endif %}" href="{{ url_for('index') }}">總覽</a>
         {% set navp = request.path %}
-        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/alerts') or navp.startswith('/counts') or navp.startswith('/reservations') or navp.startswith('/receipts') or navp.startswith('/orders') %} here{% endif %}">
-            <summary>庫存作業</summary>
+        <details class="menu{% if navp in ('/stock/in', '/stock/out', '/search/image', '/labels') or navp.startswith('/receipts') or navp.startswith('/pick') %} here{% endif %}">
+            <summary>現場收發</summary>
             <div class="menu-panel">
-                <a {% if navp.startswith('/orders') %}class="active" {% endif %}href="{{ url_for('orders_page') }}">採購單</a>
+                <a {% if navp == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫登記</a>
+                <a {% if navp == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫登記</a>
                 <a {% if navp.startswith('/receipts') %}class="active" {% endif %}href="{{ url_for('receipts_page') }}">收貨單</a>
-                <a {% if navp == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">入庫</a>
-                <a {% if navp == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">出庫</a>
-                <a {% if navp.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">盤點</a>
-                <a {% if navp.startswith('/reservations') %}class="active" {% endif %}href="{{ url_for('reservations_page') }}">預留</a>
-                <a {% if navp == '/alerts' %}class="active" {% endif %}href="{{ url_for('alerts') }}">低庫存警示</a>
-            </div>
-        </details>
-        <details class="menu{% if navp in ('/products/new', '/search/image', '/labels') or navp.startswith('/suppliers') %} here{% endif %}">
-            <summary>商品資料</summary>
-            <div class="menu-panel">
-                <a {% if navp == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
-                <a {% if navp.startswith('/suppliers') %}class="active" {% endif %}href="{{ url_for('suppliers') }}">供應商</a>
-                <a {% if navp == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖搜圖</a>
+                <a {% if navp == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖找料</a>
                 <a {% if navp == '/labels' %}class="active" {% endif %}href="{{ url_for('labels_page') }}">料架標籤</a>
             </div>
         </details>
-        <details class="menu{% if navp in ('/report', '/history') or navp.startswith('/planning') %} here{% endif %}">
-            <summary>分析報表</summary>
+        <details class="menu{% if navp == '/alerts' or navp.startswith('/orders') or navp.startswith('/planning') %} here{% endif %}">
+            <summary>採購進貨</summary>
             <div class="menu-panel">
-                <a {% if navp == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">報表</a>
+                <a {% if navp.startswith('/orders') %}class="active" {% endif %}href="{{ url_for('orders_page') }}">採購單</a>
+                <a {% if navp == '/alerts' %}class="active" {% endif %}href="{{ url_for('alerts') }}">短缺與效期</a>
+                <a {% if navp.startswith('/planning') %}class="active" {% endif %}href="{{ url_for('planning_page') }}">補貨規劃</a>
+            </div>
+        </details>
+        <details class="menu{% if navp in ('/report', '/history') or navp.startswith('/counts') or navp.startswith('/reservations') %} here{% endif %}">
+            <summary>查帳與報表</summary>
+            <div class="menu-panel">
+                <a {% if navp == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">庫存報表</a>
                 <a {% if navp == '/history' %}class="active" {% endif %}href="{{ url_for('history') }}">異動歷史</a>
-                <a {% if navp.startswith('/planning') %}class="active" {% endif %}href="{{ url_for('planning_page') }}">存貨規劃</a>
+                <a {% if navp.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">循環盤點</a>
+                <a {% if navp.startswith('/reservations') %}class="active" {% endif %}href="{{ url_for('reservations_page') }}">預留</a>
             </div>
         </details>
-        {% if session.get('is_admin') %}
-        <details class="menu{% if navp in ('/import', '/audit') or navp.startswith('/users') %} here{% endif %}">
-            <summary>系統管理</summary>
+        <details class="menu{% if navp in ('/products/new', '/import', '/audit') or navp.startswith('/suppliers') or navp.startswith('/users') %} here{% endif %}">
+            <summary>{% if session.get('is_admin') %}系統設定{% else %}商品資料{% endif %}</summary>
             <div class="menu-panel">
+                <a {% if navp == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
+                <a {% if navp.startswith('/suppliers') %}class="active" {% endif %}href="{{ url_for('suppliers') }}">供應商</a>
+                {% if session.get('is_admin') %}
                 <a {% if navp == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
-                <a {% if navp == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核軌跡</a>
                 <a {% if navp.startswith('/users') %}class="active" {% endif %}href="{{ url_for('users_page') }}">帳號管理</a>
+                <a {% if navp == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核紀錄</a>
+                {% endif %}
             </div>
         </details>
-        {% endif %}
-        <span class="user-info">{{ session.get('username') }}{% if session.get('is_admin') %}(管理員){% endif %}&nbsp;|&nbsp;<a href="{{ url_for('logout') }}">登出</a></span>
     </nav>
     {% endif %}
-    <div class="container">
+    <div class="container{% if narrow %} narrow{% endif %}">
+        {% if back_url %}<p class="crumb"><a href="{{ back_url }}">← {{ back_label }}</a></p>{% endif %}
         {% if error %}<div class="msg error">{{ error }}</div>{% endif %}
         {% if msg %}<div class="msg ok">{{ msg }}</div>{% endif %}
         __BODY__
     </div>
-    <footer>庫存管理系統 &copy; {{ year }}　·　版本 {{ app_version }}</footer>
+    <footer>庫存管理系統 &copy; {{ year }}　·　版本 <span class="ver">{{ app_version }}</span></footer>
 </body>
 </html>
 """
@@ -1223,6 +1352,11 @@ def build_pager(endpoint, page, has_next, **params):
 def render_page(body, **ctx):
     ctx.setdefault("error", None)
     ctx.setdefault("msg", None)
+    # 每頁自己的分頁標題(WCAG 2.4.2 最低 A 級);title 是各頁本來就會傳的頁名
+    ctx.setdefault("page_title", ctx.get("title"))
+    ctx.setdefault("narrow", False)       # 純表單頁收窄容器
+    ctx.setdefault("back_url", None)      # 明細頁的具名返回連結
+    ctx.setdefault("back_label", "返回")
     ctx.setdefault("year", datetime.now().year)
     ctx.setdefault("app_version", APP_VERSION)
     return render_template_string(LAYOUT.replace("__BODY__", body), **ctx)
@@ -1281,19 +1415,8 @@ PAGE_INDEX = """
     <a class="plain" href="{{ url_for('index') }}">清除搜尋</a> ・
     <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
 </p>
-<div class="quick-actions">
-    <a href="{{ url_for('stock_in') }}"><span class="qa-icon qa-in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/></svg></span>入庫登記</a>
-    <a href="{{ url_for('stock_out') }}"><span class="qa-icon qa-out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M4 4h16"/></svg></span>出庫登記</a>
-    <a href="{{ url_for('receipts_page') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18v5H3z"/><path d="M5 12v8h14v-8"/><path d="M12 7v13"/><path d="M12 7 8.5 3.5M12 7l3.5-3.5"/></svg></span>收貨單</a>
-    <a href="{{ url_for('image_search') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.7l1.3-2h6l1.3 2h1.7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg></span>以圖搜圖</a>
-    <a href="{{ url_for('counts_page') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/><rect x="9" y="2.5" width="6" height="3.5" rx="1"/><path d="m8.6 13 1.9 1.9 3.9-3.9"/><path d="M8.6 18h6.8"/></svg></span>循環盤點</a>
-    {% if session.get('is_admin') %}
-    <a href="{{ url_for('csv_import') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13 3v6h6"/><path d="M12 12v5"/><path d="m9.6 14.6 2.4-2.6 2.4 2.6"/></svg></span>CSV 匯入</a>
-    {% endif %}
-    <a href="{{ url_for('product_new') }}"><span class="qa-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v12"/><path d="M6 12h12"/></svg></span>新增商品</a>
-</div>
 {% if po_summary_total %}
-<div class="detail-section po-home">
+<div class="po-home">
     <h2>採購在途</h2>
     <div class="po-flow">
         {% for st in ['ordered','shipped','arrived'] %}
@@ -1350,21 +1473,23 @@ PAGE_ALERTS = """
 <h1>低庫存警示</h1>
 {% if products %}
 <p>下列商品庫存已達到或低於門檻,請儘快補貨:</p>
-<table class="cards">
-    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">現貨</th><th class="num">可用</th><th class="num">低庫存門檻</th><th>單位</th><th>供應商</th></tr>
-    {% for p in products %}
-    <tr class="low-stock">
-        <td data-label="SKU">{{ p['sku'] }}</td>
-        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
-        <td data-label="儲位">{{ p['location'] or '—' }}</td>
-        <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
-        <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
-        <td data-label="單位">{{ p['unit'] }}</td>
-        <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table class="cards">
+        <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">現貨</th><th class="num">可用</th><th class="num">低庫存門檻</th><th>單位</th><th>供應商</th></tr>
+        {% for p in products %}
+        <tr class="low-stock">
+            <td data-label="SKU">{{ p['sku'] }}</td>
+            <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
+            <td data-label="儲位">{{ p['location'] or '—' }}</td>
+            <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+            <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
+            <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
+            <td data-label="單位">{{ p['unit'] }}</td>
+            <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 {% else %}
 <p>目前沒有低庫存商品。</p>
 {% endif %}
@@ -1373,19 +1498,21 @@ PAGE_ALERTS = """
     <h2>效期警示</h2>
     {% if expiring %}
     <p class="note">下列批次已過期或將在 30 天內到期,請優先使用或處理:</p>
-    <table class="cards">
-        <tr><th>批號</th><th>商品</th><th>SKU</th><th class="num">剩餘</th><th>有效期</th><th class="num">剩餘天數</th></tr>
-        {% for l in expiring %}
-        <tr{% if l['expired'] %} class="low-stock"{% endif %}>
-            <td data-label="批號">{{ l['lot_no'] }}</td>
-            <td data-label="商品"><a class="plain" href="{{ url_for('product_detail', pid=l['product_id']) }}">{{ l['name'] }}</a></td>
-            <td data-label="SKU">{{ l['sku'] }}</td>
-            <td data-label="剩餘" class="num">{{ l['qty_remaining'] }} {{ l['unit'] }}</td>
-            <td data-label="有效期">{{ l['expiry_date'] }}</td>
-            <td data-label="剩餘天數" class="num">{% if l['expired'] %}<strong style="color:#b91c1c">已過期</strong>{% else %}{{ l['days_left'] }} 天{% endif %}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>批號</th><th>商品</th><th>SKU</th><th class="num">剩餘</th><th>有效期</th><th class="num">剩餘天數</th></tr>
+            {% for l in expiring %}
+            <tr{% if l['expired'] %} class="low-stock"{% endif %}>
+                <td data-label="批號">{{ l['lot_no'] }}</td>
+                <td data-label="商品"><a class="plain" href="{{ url_for('product_detail', pid=l['product_id']) }}">{{ l['name'] }}</a></td>
+                <td data-label="SKU">{{ l['sku'] }}</td>
+                <td data-label="剩餘" class="num">{{ l['qty_remaining'] }} {{ l['unit'] }}</td>
+                <td data-label="有效期">{{ l['expiry_date'] }}</td>
+                <td data-label="剩餘天數" class="num">{% if l['expired'] %}<strong style="color:#b91c1c">已過期</strong>{% else %}{{ l['days_left'] }} 天{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>沒有即將到期的批次(僅統計有設定有效期的批次)。</p>
     {% endif %}
@@ -1428,48 +1555,138 @@ PAGE_PRODUCT_FORM = """
 <p class="note">庫存數量不在此處修改,請透過「入庫 / 出庫」登記異動。</p>
 """
 
-PAGE_STOCK_FORM = """
+PAGE_PICK = """
 <h1>{{ title }}</h1>
-{% if product_list %}
-<form method="post">
-    <label>商品</label>
-    <select name="product_id">
-        {% for p in product_list %}
-        <option value="{{ p['id'] }}" {% if f['product_id']|string == p['id']|string %}selected{% endif %}>{{ p['name'] }}({{ p['sku'] }},目前庫存 {{ p['quantity'] }} {{ p['unit'] }})</option>
-        {% endfor %}
-    </select>
-    <label>數量</label><input type="number" name="quantity" min="1" inputmode="numeric" value="{{ f['quantity'] }}">
-    {% if is_in %}
-    <label>數量單位</label>
-    <select name="qty_unit">
-        <option value="stock" {% if f['qty_unit'] != 'purchase' %}selected{% endif %}>庫存單位(直接輸入實際數量)</option>
-        <option value="purchase" {% if f['qty_unit'] == 'purchase' %}selected{% endif %}>採購單位(依商品設定的換算率自動換算)</option>
-    </select>
-    <label>批號(選填,未填自動編號)</label><input type="text" name="lot_no" value="{{ f['lot_no'] }}" placeholder="例:供應商批號">
-    <label>有效期(選填,設定後可做 FEFO 與到期警示)</label><input type="date" name="expiry_date" value="{{ f['expiry_date'] }}">
-    <label>成本單價(選填,供加權平均成本報表)</label><input type="text" name="unit_cost" value="{{ f['unit_cost'] }}" inputmode="decimal">
-    {% endif %}
-    <label>用途 / 工單(選填,可於歷史篩選)</label><input type="text" name="purpose" value="{{ f['purpose'] }}" placeholder="例:WO-1001、產線A、維修">
-    <label>備註</label><input type="text" name="note" value="{{ f['note'] }}">
-    <input type="submit" value="{{ title }}">
-    {% if not is_in %}
-    <p class="note">出庫依 FIFO 先進先出原則,自動從最早入庫的批次扣減,消耗明細記錄於異動歷史。</p>
-    {% endif %}
+<p class="note">掃碼槍可直接掃。只找到一筆時系統會自動帶你進下一步。</p>
+<form method="get" class="hero-search">
+    <input type="hidden" name="to" value="{{ to }}">
+    {% for k, v in extra.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    <span class="search-field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+        <label class="sr-only" for="pq">輸入料號、品名或儲位</label>
+        <input id="pq" type="text" name="q" value="{{ q }}" placeholder="料號、品名、儲位、跨公司別名料號" autofocus>
+    </span>
+    <input type="submit" value="搜尋">
 </form>
-{% else %}
-<p>目前沒有任何商品,請先<a class="plain" href="{{ url_for('product_new') }}">新增商品</a>。</p>
+{% if q and not rows %}
+<p class="note">找不到符合「{{ q }}」的料。可以改用品名的一部分、儲位,或對方公司的料號再試一次。</p>
+{% endif %}
+{% if rows %}
+<div class="pane">
+    <div class="pane-h">{% if q %}符合「{{ q }}」的料{% else %}最近登記過的料{% endif %}<span class="r">{{ rows|length }} 筆{% if truncated %}(只顯示前 {{ rows|length }} 筆,請輸入更完整的料號){% endif %}</span></div>
+    <div class="pane-b">
+    <div class="picklist">
+        {% for p in rows %}
+        {% if post_to %}
+        <form method="post" action="{{ post_to }}">
+            <input type="hidden" name="product_id" value="{{ p['id'] }}">
+            {% if remember %}<input type="hidden" name="remember" value="1">{% endif %}
+            <button class="pickrow" type="submit" style="width:100%">
+                <span class="sku">{{ p['sku'] }}</span>
+                <span class="nm">{{ p['name'] }}</span>
+                <span class="loc">{{ p['location'] or '無儲位' }}</span>
+                <span class="pq">{{ p['quantity'] }}<span class="unit">{{ p['unit'] }}</span></span>
+            </button>
+        </form>
+        {% else %}
+        <a class="pickrow" href="{{ link_base }}{{ p['id'] }}">
+            <span class="sku">{{ p['sku'] }}</span>
+            <span class="nm">{{ p['name'] }}</span>
+            <span class="loc">{{ p['location'] or '無儲位' }}</span>
+            <span class="pq">{{ p['quantity'] }}<span class="unit">{{ p['unit'] }}</span></span>
+        </a>
+        {% endif %}
+        {% endfor %}
+    </div>
+    </div>
+</div>
 {% endif %}
 """
+
+PAGE_STOCK_FORM = """
+<h1>{{ title }}</h1>
+<div class="pickcard">
+    <div>
+        <div class="nm">{{ prod['name'] }}</div>
+        <div class="meta">{{ prod['sku'] }}　·　儲位 {{ prod['location'] or '未設定' }}　·　{{ prod['supplier_name'] or '無供應商' }}</div>
+    </div>
+    <div class="right">
+        <div class="big">{{ prod['quantity'] }}</div>
+        <div class="meta">目前現貨({{ prod['unit'] }}){% if prod['reserved'] %}　·　已預留 {{ prod['reserved'] }}{% endif %}　·　<a href="{{ url_for('pick', to=('in' if is_in else 'out')) }}">換一項料</a></div>
+    </div>
+</div>
+<form method="post">
+    <input type="hidden" name="product_id" value="{{ prod['id'] }}">
+    <label for="qty">數量 <span class="req">必填</span></label>
+    <input id="qty" class="w-qty" type="number" name="quantity" min="1" inputmode="numeric" value="{{ f['quantity'] }}">
+    {% if is_in %}
+    <label for="qu">數量單位</label>
+    <select id="qu" name="qty_unit">
+        <option value="stock" {% if f['qty_unit'] != 'purchase' %}selected{% endif %}>庫存單位({{ prod['unit'] }})——直接輸入實際數量</option>
+        <option value="purchase" {% if f['qty_unit'] == 'purchase' %}selected{% endif %}>採購單位({{ prod['purchase_unit'] or '未設定' }})——自動換算</option>
+    </select>
+    <label for="lot">批號 <span class="opt">選填</span></label>
+    <p class="field-help">不填會自動編號。填了以後可以追這批貨從哪來、什麼時候到。</p>
+    <input id="lot" class="w-code" type="text" name="lot_no" value="{{ f['lot_no'] }}" placeholder="例:供應商批號">
+    <label for="exp">有效期 <span class="opt">選填</span></label>
+    <p class="field-help">設定後可做 FEFO 先到期先出與到期警示。</p>
+    <input id="exp" class="w-code" type="date" name="expiry_date" value="{{ f['expiry_date'] }}">
+    <label for="cost">成本單價 <span class="opt">選填</span></label>
+    <p class="field-help">供加權平均成本報表。</p>
+    <input id="cost" class="w-qty" type="text" name="unit_cost" value="{{ f['unit_cost'] }}" inputmode="decimal">
+    {% endif %}
+    <label for="pp">用途 / 工單 <span class="opt">選填</span></label>
+    <input id="pp" class="w-code" type="text" name="purpose" value="{{ f['purpose'] }}" placeholder="例:WO-1001、產線A、維修">
+    <label for="nt">備註 <span class="opt">選填</span></label>
+    <input id="nt" type="text" name="note" value="{{ f['note'] }}">
+    <input type="submit" value="{{ title }}">
+    {% if not is_in %}
+    <p class="note">出庫依 FIFO 先進先出原則,自動從最早入庫的批次扣減,消耗明細記錄於異動歷史。可出庫數量為<b>可用量</b>(現貨扣掉已預留)。</p>
+    {% endif %}
+</form>
+{% if recent %}
+<div class="pane" style="margin-top:24px">
+    <div class="pane-h">本次已登記<span class="r">最近 {{ recent|length }} 筆 · 打錯可以直接沖銷</span></div>
+    <div class="table-scroll">
+        <table>
+            <tr><th>時間(台灣)</th><th>類型</th><th class="num">數量</th><th>批號</th><th>操作人</th><th>操作</th></tr>
+            {% for t in recent %}
+            <tr>
+                <td class="mono">{{ t['local_time'] }}</td>
+                <td>{% if t['type'] == 'in' %}<span class="chip ok">入庫</span>{% else %}<span class="chip info">出庫</span>{% endif %}</td>
+                <td class="num mono">{{ t['quantity'] }}</td>
+                <td class="mono">{{ t['lot_info'] or '—' }}</td>
+                <td>{{ t['username'] }}</td>
+                <td data-label="操作">
+                    {% if t['reversed'] %}<span class="chip off">已沖銷</span>
+                    {% elif t['is_reversal'] %}<span class="chip off">沖銷紀錄</span>
+                    {% else %}
+                    <form class="inline" method="post" action="{{ url_for('transaction_reverse', tid=t['id']) }}"
+                          onsubmit="return confirm('確定沖銷這筆{% if t['type'] == 'in' %}入庫{% else %}出庫{% endif %} {{ t['quantity'] }}?庫存與批次都會回到登記前的狀態。');">
+                        <button class="small-btn" type="submit">沖銷這筆</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+{% endif %}
+"""
+
 
 PAGE_HISTORY = """
 <h1>異動歷史</h1>
 <form method="get" class="filters">
-    <select name="product_id">
-        <option value="">全部商品</option>
-        {% for p in product_list %}
-        <option value="{{ p['id'] }}" {% if filters['product_id']|string == p['id']|string %}selected{% endif %}>{{ p['name'] }}({{ p['sku'] }})</option>
-        {% endfor %}
-    </select>
+    {% if filters['product_id'] and picked_product %}
+    <input type="hidden" name="product_id" value="{{ filters['product_id'] }}">
+    <span class="chip info">只看 {{ picked_product['sku'] }} {{ picked_product['name'] }}</span>
+    <a class="chip-link" href="{{ url_for('history') }}">看全部商品</a>
+    {% else %}
+    <label class="sr-only" for="hq">依料號、品名或儲位篩選商品</label>
+    <input id="hq" type="text" name="pq" value="{{ filters['pq'] }}" placeholder="料號 / 品名 / 儲位(留白=全部商品)">
+    {% endif %}
     <select name="type">
         <option value="">入庫+出庫</option>
         <option value="in" {% if filters['type'] == 'in' %}selected{% endif %}>只看入庫</option>
@@ -1484,22 +1701,24 @@ PAGE_HISTORY = """
     <a class="plain" href="{{ url_for('export_transactions', **filters) }}">匯出異動 CSV</a>
 </form>
 {% if rows %}
-<table>
-    <tr><th>時間(台灣)</th><th>類型</th><th>商品</th><th>SKU</th><th class="num">數量</th><th>批次</th><th>用途／工單</th><th>備註</th><th>操作人員</th></tr>
-    {% for r in rows %}
-    <tr>
-        <td>{{ r['created_local'] }}</td>
-        <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
-        <td>{{ r['product_name'] }}</td>
-        <td>{{ r['sku'] }}</td>
-        <td class="num">{{ r['quantity'] }}</td>
-        <td class="alias-cell">{{ r['lot_info'] or '—' }}</td>
-        <td>{{ r['purpose'] or '—' }}</td>
-        <td>{{ r['note'] }}</td>
-        <td>{{ r['username'] }}</td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table>
+        <tr><th>時間(台灣)</th><th>類型</th><th>商品</th><th>SKU</th><th class="num">數量</th><th>批次</th><th>用途／工單</th><th>備註</th><th>操作人員</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td>{{ r['created_local'] }}</td>
+            <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
+            <td>{{ r['product_name'] }}</td>
+            <td>{{ r['sku'] }}</td>
+            <td class="num">{{ r['quantity'] }}</td>
+            <td class="alias-cell">{{ r['lot_info'] or '—' }}</td>
+            <td>{{ r['purpose'] or '—' }}</td>
+            <td>{{ r['note'] }}</td>
+            <td>{{ r['username'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 {{ pager }}
 {% else %}
 <p>沒有符合條件的異動紀錄。</p>
@@ -1510,27 +1729,29 @@ PAGE_SUPPLIERS = """
 <h1>供應商管理</h1>
 <p><a class="plain" href="{{ url_for('supplier_new') }}">＋ 新增供應商</a></p>
 {% if rows %}
-<table>
-    <tr><th>名稱</th><th>聯絡人</th><th>電話</th><th>備註</th><th>商品數</th><th>操作</th></tr>
-    {% for s in rows %}
-    <tr>
-        <td>{{ s['name'] }}</td>
-        <td>{{ s['contact'] }}</td>
-        <td>{{ s['phone'] }}</td>
-        <td>{{ s['note'] }}</td>
-        <td>{{ s['product_count'] }}</td>
-        <td>
-            <a class="plain" href="{{ url_for('supplier_edit', sid=s['id']) }}">編輯</a>
-            {% if session.get('is_admin') %}
-            <form class="inline" method="post" action="{{ url_for('supplier_delete', sid=s['id']) }}"
-                  onsubmit="return confirm('確定刪除供應商「{{ s['name'] }}」?其商品的供應商欄位將被清空。');">
-                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
-            </form>
-            {% endif %}
-        </td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table>
+        <tr><th>名稱</th><th>聯絡人</th><th>電話</th><th>備註</th><th>商品數</th><th>操作</th></tr>
+        {% for s in rows %}
+        <tr>
+            <td>{{ s['name'] }}</td>
+            <td>{{ s['contact'] }}</td>
+            <td>{{ s['phone'] }}</td>
+            <td>{{ s['note'] }}</td>
+            <td>{{ s['product_count'] }}</td>
+            <td>
+                <a class="plain" href="{{ url_for('supplier_edit', sid=s['id']) }}">編輯</a>
+                {% if session.get('is_admin') %}
+                <form class="inline" method="post" action="{{ url_for('supplier_delete', sid=s['id']) }}"
+                      onsubmit="return confirm('確定刪除供應商「{{ s['name'] }}」?其商品的供應商欄位將被清空。');">
+                    <button class="small-btn icon-btn" type="submit" title="刪除供應商" aria-label="刪除供應商"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 {% else %}
 <p>目前沒有供應商資料。</p>
 {% endif %}
@@ -1556,67 +1777,73 @@ PAGE_REPORT = """
     <a class="plain" href="{{ url_for('report') }}">清除</a>
 </form>
 <p class="note">入庫/出庫總量統計{% if start or end %}套用上方日期區間{% else %}為全部期間{% endif %};「目前庫存」「庫存價值」「平均成本」一律為現時狀態。</p>
-<table>
-    <tr><th>SKU</th><th>名稱</th><th class="num">入庫總量</th><th class="num">出庫總量</th><th class="num">淨變動</th><th class="num">目前庫存</th><th class="num">單價</th><th class="num">平均成本</th><th class="num">庫存價值</th></tr>
-    {% for r in rows %}
-    <tr>
-        <td>{{ r['sku'] }}</td>
-        <td>{{ r['name'] }}</td>
-        <td class="num" id="in-{{ r['id'] }}">{{ r['total_in'] }}</td>
-        <td class="num" id="out-{{ r['id'] }}">{{ r['total_out'] }}</td>
-        <td class="num">{{ r['net'] }}</td>
-        <td class="num" id="qty-{{ r['id'] }}">{{ r['quantity'] }}</td>
-        <td class="num">{{ r['unit_price_str'] }}</td>
-        <td class="num">{{ r['avg_cost_str'] }}</td>
-        <td class="num" id="value-{{ r['id'] }}">{{ r['value_str'] }}</td>
-    </tr>
-    {% endfor %}
-    <tr>
-        <th colspan="2">總計</th>
-        <th class="num" id="total-in">{{ total_in }}</th>
-        <th class="num" id="total-out">{{ total_out }}</th>
-        <th class="num">{{ total_net }}</th>
-        <th class="num" id="total-qty">{{ total_qty }}</th>
-        <th></th>
-        <th></th>
-        <th class="num" id="total-value">{{ total_value_str }}</th>
-    </tr>
-</table>
+<div class="table-scroll">
+    <table>
+        <tr><th>SKU</th><th>名稱</th><th class="num">入庫總量</th><th class="num">出庫總量</th><th class="num">淨變動</th><th class="num">目前庫存</th><th class="num">單價</th><th class="num">平均成本</th><th class="num">庫存價值</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td>{{ r['sku'] }}</td>
+            <td>{{ r['name'] }}</td>
+            <td class="num" id="in-{{ r['id'] }}">{{ r['total_in'] }}</td>
+            <td class="num" id="out-{{ r['id'] }}">{{ r['total_out'] }}</td>
+            <td class="num">{{ r['net'] }}</td>
+            <td class="num" id="qty-{{ r['id'] }}">{{ r['quantity'] }}</td>
+            <td class="num">{{ r['unit_price_str'] }}</td>
+            <td class="num">{{ r['avg_cost_str'] }}</td>
+            <td class="num" id="value-{{ r['id'] }}">{{ r['value_str'] }}</td>
+        </tr>
+        {% endfor %}
+        <tr>
+            <th colspan="2">總計</th>
+            <th class="num" id="total-in">{{ total_in }}</th>
+            <th class="num" id="total-out">{{ total_out }}</th>
+            <th class="num">{{ total_net }}</th>
+            <th class="num" id="total-qty">{{ total_qty }}</th>
+            <th></th>
+            <th></th>
+            <th class="num" id="total-value">{{ total_value_str }}</th>
+        </tr>
+    </table>
+</div>
 <p class="note">平均成本為加權平均成本(存貨計價):僅以尚有剩餘且有登記成本的批次計算,「—」表示無成本資料。</p>
 
 <div class="detail-section">
     <h2>庫齡分析(Inventory Aging)</h2>
-    <table>
-        <tr><th>庫齡區間</th><th class="num">在庫數量</th><th class="num">占比</th></tr>
-        {% for b in aging %}
-        <tr>
-            <td>{{ b['label'] }}</td>
-            <td class="num">{{ b['qty'] }}</td>
-            <td class="num">{{ b['pct_str'] }}%</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table>
+            <tr><th>庫齡區間</th><th class="num">在庫數量</th><th class="num">占比</th></tr>
+            {% for b in aging %}
+            <tr>
+                <td>{{ b['label'] }}</td>
+                <td class="num">{{ b['qty'] }}</td>
+                <td class="num">{{ b['pct_str'] }}%</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     <p class="note">依各批次入庫時間計算;90 天以上的在庫批次通常代表呆滯風險,建議優先檢視與去化。</p>
 </div>
 
 <div class="detail-section">
     <h2>ABC 分析(柏拉圖法則)</h2>
-    <table>
-        <tr><th>ABC</th><th>XYZ</th><th>組合</th><th>SKU</th><th>名稱</th><th class="num">庫存價值</th><th class="num">價值占比</th><th class="num">累積占比</th><th class="num">變異係數</th></tr>
-        {% for r in abc_rows %}
-        <tr>
-            <td><strong>{{ r['abc'] }}</strong></td>
-            <td>{{ r['xyz'] }}</td>
-            <td><strong>{{ r['abc_xyz'] }}</strong></td>
-            <td>{{ r['sku'] }}</td>
-            <td>{{ r['name'] }}</td>
-            <td class="num">{{ r['value_str'] }}</td>
-            <td class="num">{{ r['pct_str'] }}%</td>
-            <td class="num">{{ r['cum_pct_str'] }}%</td>
-            <td class="num">{{ r['cv_str'] }}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table>
+            <tr><th>ABC</th><th>XYZ</th><th>組合</th><th>SKU</th><th>名稱</th><th class="num">庫存價值</th><th class="num">價值占比</th><th class="num">累積占比</th><th class="num">變異係數</th></tr>
+            {% for r in abc_rows %}
+            <tr>
+                <td><strong>{{ r['abc'] }}</strong></td>
+                <td>{{ r['xyz'] }}</td>
+                <td><strong>{{ r['abc_xyz'] }}</strong></td>
+                <td>{{ r['sku'] }}</td>
+                <td>{{ r['name'] }}</td>
+                <td class="num">{{ r['value_str'] }}</td>
+                <td class="num">{{ r['pct_str'] }}%</td>
+                <td class="num">{{ r['cum_pct_str'] }}%</td>
+                <td class="num">{{ r['cv_str'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     <p class="note">
         A 級(累積價值 ≤80%)是最該重點盤點與控管的少數關鍵料號;B 級(≤95%)次之;C 級數量多但價值低,可放寬管理頻率。<br>
         XYZ 依需求變異係數分級:X 穩定(CV&lt;0.5)、Y 中等(0.5–1.0)、Z 高度波動(&gt;1.0)。
@@ -1647,21 +1874,23 @@ PAGE_REPORT = """
 
 PAGE_PRODUCT_DETAIL = """
 <h1>商品詳細:{{ p['name'] }}</h1>
-<table class="cards">
-    <tr><th>SKU</th><th>儲位</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>出庫策略</th><th>供應商</th></tr>
-    <tr>
-        <td data-label="SKU">{{ p['sku'] }}</td>
-        <td data-label="儲位">{{ p['location'] or '—' }}</td>
-        <td data-label="分類">{{ p['category'] }}</td>
-        <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
-        <td data-label="單位">{{ p['unit'] }}{% if p['purchase_unit'] %}(採購:1 {{ p['purchase_unit'] }} = {{ p['units_per_purchase'] }} {{ p['unit'] }}){% endif %}</td>
-        <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
-        <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
-        <td data-label="出庫策略">{{ p['issue_strategy'] }}</td>
-        <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
-    </tr>
-</table>
+<div class="table-scroll">
+    <table class="cards">
+        <tr><th>SKU</th><th>儲位</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>出庫策略</th><th>供應商</th></tr>
+        <tr>
+            <td data-label="SKU">{{ p['sku'] }}</td>
+            <td data-label="儲位">{{ p['location'] or '—' }}</td>
+            <td data-label="分類">{{ p['category'] }}</td>
+            <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+            <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
+            <td data-label="單位">{{ p['unit'] }}{% if p['purchase_unit'] %}(採購:1 {{ p['purchase_unit'] }} = {{ p['units_per_purchase'] }} {{ p['unit'] }}){% endif %}</td>
+            <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
+            <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
+            <td data-label="出庫策略">{{ p['issue_strategy'] }}</td>
+            <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
+        </tr>
+    </table>
+</div>
 <div class="qr-row">
     <img class="qr-img" src="{{ url_for('product_qr', pid=p['id']) }}" alt="料號 QR">
     <div>
@@ -1687,7 +1916,7 @@ PAGE_PRODUCT_DETAIL = """
             {% if session.get('is_admin') %}
             <form class="inline" method="post" action="{{ url_for('image_delete', pid=p['id'], img_id=img['id']) }}"
                   onsubmit="return confirm('確定刪除這張照片?');">
-                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
+                <button class="small-btn icon-btn" type="submit" title="刪除照片" aria-label="刪除照片"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
             </form>
             {% endif %}
         </div>
@@ -1706,20 +1935,22 @@ PAGE_PRODUCT_DETAIL = """
     <h2>在途採購</h2>
     {% if open_pos %}
     <p class="note">這項料目前還有 <strong>{{ onorder_total }}</strong> 在路上。下單前先看這裡,避免重複採購。</p>
-    <table class="cards">
-        <tr><th>採購單</th><th>狀態</th><th>預計到貨</th><th class="num">訂購</th><th class="num">已收</th><th class="num">在途</th><th>操作</th></tr>
-        {% for o in open_pos %}
-        <tr>
-            <td data-label="採購單">{{ o['po_no'] or '(未填單號)' }}</td>
-            <td data-label="狀態"><span class="chip-po chip-{{ o['status'] }}">{{ o['status_label'] }}</span></td>
-            <td data-label="預計到貨">{{ o['eta'] or '—' }}</td>
-            <td data-label="訂購" class="num">{{ o['ordered_qty'] }}</td>
-            <td data-label="已收" class="num">{{ o['received_qty'] }}</td>
-            <td data-label="在途" class="num"><span class="onorder-cell">{{ o['onorder'] }}</span></td>
-            <td data-label="操作"><a class="plain" href="{{ url_for('order_detail', oid=o['id']) }}">開啟</a></td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>採購單</th><th>狀態</th><th>預計到貨</th><th class="num">訂購</th><th class="num">已收</th><th class="num">在途</th><th>操作</th></tr>
+            {% for o in open_pos %}
+            <tr>
+                <td data-label="採購單">{{ o['po_no'] or '(未填單號)' }}</td>
+                <td data-label="狀態"><span class="chip-po chip-{{ o['status'] }}">{{ o['status_label'] }}</span></td>
+                <td data-label="預計到貨">{{ o['eta'] or '—' }}</td>
+                <td data-label="訂購" class="num">{{ o['ordered_qty'] }}</td>
+                <td data-label="已收" class="num">{{ o['received_qty'] }}</td>
+                <td data-label="在途" class="num"><span class="onorder-cell">{{ o['onorder'] }}</span></td>
+                <td data-label="操作"><a class="plain" href="{{ url_for('order_detail', oid=o['id']) }}">開啟</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p class="note">目前沒有這項料的在途採購單。</p>
     {% endif %}
@@ -1728,24 +1959,26 @@ PAGE_PRODUCT_DETAIL = """
 <div class="detail-section">
     <h2>跨公司料號對照</h2>
     {% if aliases %}
-    <table>
-        <tr><th>公司</th><th>該公司料號</th><th>備註</th><th>操作</th></tr>
-        {% for a in aliases %}
-        <tr>
-            <td>{{ a['company'] }}</td>
-            <td>{{ a['alias_sku'] }}</td>
-            <td>{{ a['note'] }}</td>
-            <td>
-                {% if session.get('is_admin') %}
-                <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}"
-                      onsubmit="return confirm('確定刪除別名「{{ a['company'] }}:{{ a['alias_sku'] }}」?');">
-                    <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
-                </form>
-                {% else %}—{% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table>
+            <tr><th>公司</th><th>該公司料號</th><th>備註</th><th>操作</th></tr>
+            {% for a in aliases %}
+            <tr>
+                <td>{{ a['company'] }}</td>
+                <td>{{ a['alias_sku'] }}</td>
+                <td>{{ a['note'] }}</td>
+                <td>
+                    {% if session.get('is_admin') %}
+                    <form class="inline" method="post" action="{{ url_for('alias_delete', pid=p['id'], aid=a['id']) }}"
+                          onsubmit="return confirm('確定刪除別名「{{ a['company'] }}:{{ a['alias_sku'] }}」?');">
+                        <button class="small-btn icon-btn" type="submit" title="刪除別名" aria-label="刪除別名"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
+                    </form>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>尚無別名料號。不同公司對同一物料的料號都可以登記在這裡,搜尋時任一料號都找得到。</p>
     {% endif %}
@@ -1760,20 +1993,22 @@ PAGE_PRODUCT_DETAIL = """
 <div class="detail-section">
     <h2>批次庫存(FIFO 先進先出)</h2>
     {% if lots %}
-    <table class="cards">
-        <tr><th>批號</th><th>入庫時間(台灣)</th><th class="num">庫齡(天)</th><th>有效期</th><th class="num">剩餘 / 原始</th><th class="num">成本單價</th><th>備註</th></tr>
-        {% for l in lots %}
-        <tr{% if l['qty_remaining'] == 0 %} class="lot-empty"{% endif %}>
-            <td data-label="批號">{{ l['lot_no'] }}</td>
-            <td data-label="入庫時間">{{ l['received_local'] }}</td>
-            <td data-label="庫齡(天)" class="num">{{ l['age_days'] }}</td>
-            <td data-label="有效期">{{ l['expiry_date'] or '—' }}</td>
-            <td data-label="剩餘/原始" class="num">{{ l['qty_remaining'] }} / {{ l['qty_received'] }}</td>
-            <td data-label="成本單價" class="num">{{ l['cost_str'] }}</td>
-            <td data-label="備註">{{ l['note'] }}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>批號</th><th>入庫時間(台灣)</th><th class="num">庫齡(天)</th><th>有效期</th><th class="num">剩餘 / 原始</th><th class="num">成本單價</th><th>備註</th></tr>
+            {% for l in lots %}
+            <tr{% if l['qty_remaining'] == 0 %} class="lot-empty"{% endif %}>
+                <td data-label="批號">{{ l['lot_no'] }}</td>
+                <td data-label="入庫時間">{{ l['received_local'] }}</td>
+                <td data-label="庫齡(天)" class="num">{{ l['age_days'] }}</td>
+                <td data-label="有效期">{{ l['expiry_date'] or '—' }}</td>
+                <td data-label="剩餘/原始" class="num">{{ l['qty_remaining'] }} / {{ l['qty_received'] }}</td>
+                <td data-label="成本單價" class="num">{{ l['cost_str'] }}</td>
+                <td data-label="備註">{{ l['note'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     <p class="note">出庫依 FIFO 先進先出原則自動從最早批次扣減;各筆出庫的批次消耗明細見異動歷史。</p>
     {% else %}
     <p>尚無批次紀錄,入庫後會自動建立批次。</p>
@@ -1783,18 +2018,20 @@ PAGE_PRODUCT_DETAIL = """
 <div class="detail-section">
     <h2>近期異動</h2>
     {% if recent_tx %}
-    <table>
-        <tr><th>時間(台灣)</th><th>類型</th><th>數量</th><th>備註</th><th>操作人員</th></tr>
-        {% for r in recent_tx %}
-        <tr>
-            <td>{{ r['created_local'] }}</td>
-            <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
-            <td>{{ r['quantity'] }}</td>
-            <td>{{ r['note'] }}</td>
-            <td>{{ r['username'] }}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table>
+            <tr><th>時間(台灣)</th><th>類型</th><th>數量</th><th>備註</th><th>操作人員</th></tr>
+            {% for r in recent_tx %}
+            <tr>
+                <td>{{ r['created_local'] }}</td>
+                <td>{% if r['type'] == 'in' %}入庫{% else %}出庫{% endif %}</td>
+                <td>{{ r['quantity'] }}</td>
+                <td>{{ r['note'] }}</td>
+                <td>{{ r['username'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>尚無異動紀錄。</p>
     {% endif %}
@@ -1803,22 +2040,24 @@ PAGE_PRODUCT_DETAIL = """
 
 PAGE_USERS = """
 <h1>帳號管理</h1>
-<table class="cards">
-    <tr><th>帳號</th><th>角色</th><th>建立時間</th><th>操作</th></tr>
-    {% for u in users %}
-    <tr>
-        <td data-label="帳號">{{ u['username'] }}</td>
-        <td data-label="角色">{% if u['is_admin'] %}管理員{% else %}一般使用者{% endif %}</td>
-        <td data-label="建立時間">{{ u['created_local'] }}</td>
-        <td data-label="操作">
-            <form class="inline" method="post" action="{{ url_for('user_delete', uid=u['id']) }}"
-                  onsubmit="return confirm('確定刪除帳號「{{ u['username'] }}」?');">
-                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
-            </form>
-        </td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table class="cards">
+        <tr><th>帳號</th><th>角色</th><th>建立時間</th><th>操作</th></tr>
+        {% for u in users %}
+        <tr>
+            <td data-label="帳號">{{ u['username'] }}</td>
+            <td data-label="角色">{% if u['is_admin'] %}管理員{% else %}一般使用者{% endif %}</td>
+            <td data-label="建立時間">{{ u['created_local'] }}</td>
+            <td data-label="操作">
+                <form class="inline" method="post" action="{{ url_for('user_delete', uid=u['id']) }}"
+                      onsubmit="return confirm('確定刪除帳號「{{ u['username'] }}」?');">
+                    <button class="small-btn icon-btn" type="submit" title="刪除帳號" aria-label="刪除帳號"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 
 <div class="detail-section">
     <h2>新增帳號</h2>
@@ -1855,18 +2094,20 @@ PAGE_AUDIT = """
     <a class="plain" href="{{ url_for('audit_page') }}">清除</a>
 </form>
 {% if rows %}
-<table>
-    <tr><th>時間(台灣)</th><th>操作者</th><th>動作</th><th>對象</th><th>內容</th></tr>
-    {% for r in rows %}
-    <tr>
-        <td>{{ r['created_local'] }}</td>
-        <td>{{ r['username'] }}</td>
-        <td>{{ r['action'] }}</td>
-        <td>{{ r['target_type'] }}{% if r['target_id'] %} #{{ r['target_id'] }}{% endif %}</td>
-        <td>{{ r['detail'] }}</td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table>
+        <tr><th>時間(台灣)</th><th>操作者</th><th>動作</th><th>對象</th><th>內容</th></tr>
+        {% for r in rows %}
+        <tr>
+            <td>{{ r['created_local'] }}</td>
+            <td>{{ r['username'] }}</td>
+            <td>{{ r['action'] }}</td>
+            <td>{{ r['target_type'] }}{% if r['target_id'] %} #{{ r['target_id'] }}{% endif %}</td>
+            <td>{{ r['detail'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 {{ pager }}
 {% else %}
 <p>目前沒有稽核紀錄。</p>
@@ -1906,20 +2147,22 @@ PAGE_COUNTS = """
 <div class="detail-section">
     <h2>盤點單列表</h2>
     {% if rows %}
-    <table class="cards">
-        <tr><th>名稱</th><th>範圍</th><th>建立時間</th><th>建立者</th><th>狀態</th><th class="num">準確率</th><th>操作</th></tr>
-        {% for r in rows %}
-        <tr>
-            <td data-label="名稱">{{ r['name'] }}</td>
-            <td data-label="範圍">{{ r['scope'] }}</td>
-            <td data-label="建立時間">{{ r['created_local'] }}</td>
-            <td data-label="建立者">{{ r['username'] }}</td>
-            <td data-label="狀態">{% if r['status'] == 'posted' %}<span class="chip-posted">已過帳</span>{% else %}<span class="chip-open">盤點中</span>{% endif %}</td>
-            <td data-label="準確率" class="num">{% if r['accuracy'] is not none %}{{ r['accuracy_str'] }}%{% else %}—{% endif %}</td>
-            <td data-label="操作"><a class="plain" href="{{ url_for('count_detail', cid=r['id']) }}">開啟</a></td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>名稱</th><th>範圍</th><th>建立時間</th><th>建立者</th><th>狀態</th><th class="num">準確率</th><th>操作</th></tr>
+            {% for r in rows %}
+            <tr>
+                <td data-label="名稱">{{ r['name'] }}</td>
+                <td data-label="範圍">{{ r['scope'] }}</td>
+                <td data-label="建立時間">{{ r['created_local'] }}</td>
+                <td data-label="建立者">{{ r['username'] }}</td>
+                <td data-label="狀態">{% if r['status'] == 'posted' %}<span class="chip-posted">已過帳</span>{% else %}<span class="chip-open">盤點中</span>{% endif %}</td>
+                <td data-label="準確率" class="num">{% if r['accuracy'] is not none %}{{ r['accuracy_str'] }}%{% else %}—{% endif %}</td>
+                <td data-label="操作"><a class="plain" href="{{ url_for('count_detail', cid=r['id']) }}">開啟</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>尚無盤點單。{% if session.get('is_admin') %}用上方表單建立第一張。{% else %}請洽管理員建立。{% endif %}</p>
     {% endif %}
@@ -1940,31 +2183,33 @@ PAGE_COUNT_DETAIL = """
     <div class="stat-box"><div class="stat-num" style="color:#b91c1c">{{ diff_count }}</div><div class="stat-cap">有差異</div></div>
 </div>
 
-<table class="cards">
-    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">系統帳</th><th class="num">實盤數</th><th class="num">差異</th><th>備註</th></tr>
-    {% for i in items %}
-    <tr{% if i['diff'] is not none and i['diff'] != 0 %} class="has-diff"{% endif %}>
-        <td data-label="SKU">{{ i['sku'] }}</td>
-        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['name'] }}</a></td>
-        <td data-label="儲位">{{ i['location'] or '—' }}</td>
-        <td data-label="系統帳" class="num">{{ i['system_qty'] }}</td>
-        <td data-label="實盤數" class="num">
-            {% if c['status'] == 'posted' %}{{ i['counted_qty'] if i['counted_qty'] is not none else '—' }}
-            {% else %}
-            <form class="inline count-form" method="post" action="{{ url_for('count_record', cid=c['id']) }}">
-                <input type="hidden" name="product_id" value="{{ i['product_id'] }}">
-                <input type="number" name="counted_qty" min="0" inputmode="numeric" class="count-input"
-                       value="{{ i['counted_qty'] if i['counted_qty'] is not none else '' }}">
-                <input type="text" name="note" class="count-note" placeholder="差異原因" value="{{ i['note'] }}">
-                <button class="small-btn ok-btn" type="submit">記錄</button>
-            </form>
-            {% endif %}
-        </td>
-        <td data-label="差異" class="num">{% if i['diff'] is not none %}{{ '%+d' % i['diff'] }}{% else %}—{% endif %}</td>
-        <td data-label="備註">{{ i['note'] }}</td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table class="cards">
+        <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">系統帳</th><th class="num">實盤數</th><th class="num">差異</th><th>備註</th></tr>
+        {% for i in items %}
+        <tr{% if i['diff'] is not none and i['diff'] != 0 %} class="has-diff"{% endif %}>
+            <td data-label="SKU">{{ i['sku'] }}</td>
+            <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['name'] }}</a></td>
+            <td data-label="儲位">{{ i['location'] or '—' }}</td>
+            <td data-label="系統帳" class="num">{{ i['system_qty'] }}</td>
+            <td data-label="實盤數" class="num">
+                {% if c['status'] == 'posted' %}{{ i['counted_qty'] if i['counted_qty'] is not none else '—' }}
+                {% else %}
+                <form class="inline count-form" method="post" action="{{ url_for('count_record', cid=c['id']) }}">
+                    <input type="hidden" name="product_id" value="{{ i['product_id'] }}">
+                    <input type="number" name="counted_qty" min="0" inputmode="numeric" class="count-input"
+                           value="{{ i['counted_qty'] if i['counted_qty'] is not none else '' }}">
+                    <input type="text" name="note" class="count-note" placeholder="差異原因" value="{{ i['note'] }}">
+                    <button class="small-btn ok-btn" type="submit">記錄</button>
+                </form>
+                {% endif %}
+            </td>
+            <td data-label="差異" class="num">{% if i['diff'] is not none %}{{ '%+d' % i['diff'] }}{% else %}—{% endif %}</td>
+            <td data-label="備註">{{ i['note'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 
 {% if c['status'] != 'posted' and session.get('is_admin') %}
 <div class="detail-section">
@@ -2103,17 +2348,7 @@ PAGE_ORDER_DETAIL = """
                 <br><span class="alias-cell">{{ i['psku'] }}・{{ i['match_label'] }}</span>
             {% elif o['status'] in ('ordered','shipped','arrived') %}
                 <span class="badge-low">未對應</span>
-                <form class="inline count-form" method="post"
-                      action="{{ url_for('order_item_map', oid=o['id'], item_id=i['id']) }}">
-                    <select name="product_id" class="count-note">
-                        <option value="">選擇我方商品…</option>
-                        {% for p in product_list %}<option value="{{ p['id'] }}">{{ p['sku'] }} / {{ p['name'] }}</option>{% endfor %}
-                    </select>
-                    {% if o['supplier_name'] and i['raw_sku'] %}
-                    <label class="chk"><input type="checkbox" name="remember" value="1" checked>記住此對應</label>
-                    {% endif %}
-                    <button class="small-btn ok-btn" type="submit">指定</button>
-                </form>
+                <a class="small-btn ok-btn" href="{{ url_for('pick', to='order:' ~ o['id'] ~ ':' ~ i['id'], q=i['raw_sku']) }}">指定我方商品</a>
             {% else %}<span class="badge-low">未對應</span>{% endif %}
         </td>
         <td data-label="訂購" class="num">{{ i['ordered_qty'] }}</td>
@@ -2129,21 +2364,23 @@ PAGE_ORDER_DETAIL = """
 {% if receipts %}
 <div class="detail-section">
     <h2>由本訂單產生的收貨單</h2>
-    <table class="cards">
-        <tr><th>收貨單號</th><th>建立時間</th><th>狀態</th><th>操作</th></tr>
-        {% for r in receipts %}
-        <tr>
-            <td data-label="收貨單號">{{ r['ref_no'] or '(未填單號)' }}</td>
-            <td data-label="建立時間">{{ r['created_local'] }}</td>
-            <td data-label="狀態">
-                {% if r['status'] == 'posted' %}<span class="chip-posted">已放行</span>
-                {% elif r['status'] == 'cancelled' %}<span class="chip-void">已作廢</span>
-                {% else %}<span class="chip-open">待核對</span>{% endif %}
-            </td>
-            <td data-label="操作"><a class="plain" href="{{ url_for('receipt_detail', rid=r['id']) }}">開啟</a></td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>收貨單號</th><th>建立時間</th><th>狀態</th><th>操作</th></tr>
+            {% for r in receipts %}
+            <tr>
+                <td data-label="收貨單號">{{ r['ref_no'] or '(未填單號)' }}</td>
+                <td data-label="建立時間">{{ r['created_local'] }}</td>
+                <td data-label="狀態">
+                    {% if r['status'] == 'posted' %}<span class="chip-posted">已放行</span>
+                    {% elif r['status'] == 'cancelled' %}<span class="chip-void">已作廢</span>
+                    {% else %}<span class="chip-open">待核對</span>{% endif %}
+                </td>
+                <td data-label="操作"><a class="plain" href="{{ url_for('receipt_detail', rid=r['id']) }}">開啟</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
 </div>
 {% endif %}
 
@@ -2216,26 +2453,28 @@ PAGE_RECEIPTS = """
 <div class="detail-section">
     <h2>收貨單列表</h2>
     {% if rows %}
-    <table class="cards">
-        <tr><th>單號</th><th>供應商</th><th>建立時間</th><th>建立者</th>
-            <th class="num">品項</th><th class="num">已核對</th><th>狀態</th><th>操作</th></tr>
-        {% for r in rows %}
-        <tr>
-            <td data-label="單號">{{ r['ref_no'] or '(未填單號)' }}</td>
-            <td data-label="供應商">{{ r['supplier_name'] or '—' }}</td>
-            <td data-label="建立時間">{{ r['created_local'] }}</td>
-            <td data-label="建立者">{{ r['username'] }}</td>
-            <td data-label="品項" class="num">{{ r['item_count'] }}</td>
-            <td data-label="已核對" class="num">{{ r['checked_count'] }}</td>
-            <td data-label="狀態">
-                {% if r['status'] == 'posted' %}<span class="chip-posted">已放行</span>
-                {% elif r['status'] == 'cancelled' %}<span class="chip-void">已作廢</span>
-                {% else %}<span class="chip-open">待核對</span>{% endif %}
-            </td>
-            <td data-label="操作"><a class="plain" href="{{ url_for('receipt_detail', rid=r['id']) }}">開啟</a></td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>單號</th><th>供應商</th><th>建立時間</th><th>建立者</th>
+                <th class="num">品項</th><th class="num">已核對</th><th>狀態</th><th>操作</th></tr>
+            {% for r in rows %}
+            <tr>
+                <td data-label="單號">{{ r['ref_no'] or '(未填單號)' }}</td>
+                <td data-label="供應商">{{ r['supplier_name'] or '—' }}</td>
+                <td data-label="建立時間">{{ r['created_local'] }}</td>
+                <td data-label="建立者">{{ r['username'] }}</td>
+                <td data-label="品項" class="num">{{ r['item_count'] }}</td>
+                <td data-label="已核對" class="num">{{ r['checked_count'] }}</td>
+                <td data-label="狀態">
+                    {% if r['status'] == 'posted' %}<span class="chip-posted">已放行</span>
+                    {% elif r['status'] == 'cancelled' %}<span class="chip-void">已作廢</span>
+                    {% else %}<span class="chip-open">待核對</span>{% endif %}
+                </td>
+                <td data-label="操作"><a class="plain" href="{{ url_for('receipt_detail', rid=r['id']) }}">開啟</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>尚無收貨單。用上方表單上傳供應商的送貨明細建立第一張。</p>
     {% endif %}
@@ -2260,57 +2499,49 @@ PAGE_RECEIPT_DETAIL = """
     <div class="stat-box"><div class="stat-num">{{ total_qty }}</div><div class="stat-cap">預計收料總量</div></div>
 </div>
 
-<table class="cards">
-    <tr><th>行</th><th>檔案料號</th><th>對應商品</th><th class="num">通知量</th>
-        <th class="num">實收數</th><th>批號 / 效期</th><th>備註</th></tr>
-    {% for i in items %}
-    <tr{% if i['product_id'] is none %} class="has-diff"{% endif %}>
-        <td data-label="行">{{ i['line_no'] }}</td>
-        <td data-label="檔案料號">
-            <span class="loc-cell">{{ i['raw_sku'] or '—' }}</span>
-            {% if i['raw_name'] %}<br><span class="alias-cell">{{ i['raw_name'] }}</span>{% endif %}
-        </td>
-        <td data-label="對應商品">
-            {% if i['product_id'] %}
-                <a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['pname'] }}</a>
-                <br><span class="alias-cell">{{ i['psku'] }}・{{ i['match_label'] }}</span>
-            {% elif r['status'] == 'open' %}
-                <span class="badge-low">未對應</span>
+<div class="table-scroll">
+    <table class="cards">
+        <tr><th>行</th><th>檔案料號</th><th>對應商品</th><th class="num">通知量</th>
+            <th class="num">實收數</th><th>批號 / 效期</th><th>備註</th></tr>
+        {% for i in items %}
+        <tr{% if i['product_id'] is none %} class="has-diff"{% endif %}>
+            <td data-label="行">{{ i['line_no'] }}</td>
+            <td data-label="檔案料號">
+                <span class="loc-cell">{{ i['raw_sku'] or '—' }}</span>
+                {% if i['raw_name'] %}<br><span class="alias-cell">{{ i['raw_name'] }}</span>{% endif %}
+            </td>
+            <td data-label="對應商品">
+                {% if i['product_id'] %}
+                    <a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['pname'] }}</a>
+                    <br><span class="alias-cell">{{ i['psku'] }}・{{ i['match_label'] }}</span>
+                {% elif r['status'] == 'open' %}
+                    <span class="badge-low">未對應</span>
+                    <a class="small-btn ok-btn" href="{{ url_for('pick', to='receipt:' ~ r['id'] ~ ':' ~ i['id'], q=i['raw_sku']) }}">指定我方商品</a>
+                {% else %}
+                    <span class="badge-low">未對應</span>
+                {% endif %}
+            </td>
+            <td data-label="通知量" class="num">{{ i['expected_qty'] }}</td>
+            <td data-label="實收數" class="num">
+                {% if r['status'] != 'open' %}{{ i['received_qty'] if i['received_qty'] is not none else '—' }}
+                {% else %}
                 <form class="inline count-form" method="post"
-                      action="{{ url_for('receipt_item_map', rid=r['id'], item_id=i['id']) }}">
-                    <select name="product_id" class="count-note">
-                        <option value="">選擇我方商品…</option>
-                        {% for p in product_list %}<option value="{{ p['id'] }}">{{ p['sku'] }} / {{ p['name'] }}</option>{% endfor %}
-                    </select>
-                    {% if r['supplier_name'] and i['raw_sku'] %}
-                    <label class="chk"><input type="checkbox" name="remember" value="1" checked>記住此對應</label>
-                    {% endif %}
-                    <button class="small-btn ok-btn" type="submit">指定</button>
+                      action="{{ url_for('receipt_item_check', rid=r['id'], item_id=i['id']) }}">
+                    <input type="number" name="received_qty" min="0" inputmode="numeric" class="count-input"
+                           value="{{ i['received_qty'] if i['received_qty'] is not none else i['expected_qty'] }}">
+                    <input type="text" name="note" class="count-note" placeholder="備註" value="{{ i['note'] }}">
+                    <button class="small-btn ok-btn" type="submit">核對</button>
                 </form>
-            {% else %}
-                <span class="badge-low">未對應</span>
-            {% endif %}
-        </td>
-        <td data-label="通知量" class="num">{{ i['expected_qty'] }}</td>
-        <td data-label="實收數" class="num">
-            {% if r['status'] != 'open' %}{{ i['received_qty'] if i['received_qty'] is not none else '—' }}
-            {% else %}
-            <form class="inline count-form" method="post"
-                  action="{{ url_for('receipt_item_check', rid=r['id'], item_id=i['id']) }}">
-                <input type="number" name="received_qty" min="0" inputmode="numeric" class="count-input"
-                       value="{{ i['received_qty'] if i['received_qty'] is not none else i['expected_qty'] }}">
-                <input type="text" name="note" class="count-note" placeholder="備註" value="{{ i['note'] }}">
-                <button class="small-btn ok-btn" type="submit">核對</button>
-            </form>
-            {% endif %}
-        </td>
-        <td data-label="批號 / 效期">
-            {{ i['lot_no'] or '(自動編號)' }}{% if i['expiry_date'] %}<br><span class="alias-cell">效期 {{ i['expiry_date'] }}</span>{% endif %}
-        </td>
-        <td data-label="備註">{{ i['note'] }}</td>
-    </tr>
-    {% endfor %}
-</table>
+                {% endif %}
+            </td>
+            <td data-label="批號 / 效期">
+                {{ i['lot_no'] or '(自動編號)' }}{% if i['expiry_date'] %}<br><span class="alias-cell">效期 {{ i['expiry_date'] }}</span>{% endif %}
+            </td>
+            <td data-label="備註">{{ i['note'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 
 {% if r['status'] == 'open' %}
 <div class="detail-section">
@@ -2347,40 +2578,48 @@ PAGE_RESERVATIONS = """
 
 <div class="detail-section">
     <h2>建立預留</h2>
+    {% if picked_product %}
     <form method="post" action="{{ url_for('reservation_new') }}">
-        <label>商品</label>
-        <select name="product_id">
-            {% for p in product_list %}
-            <option value="{{ p['id'] }}">{{ p['name'] }}({{ p['sku'] }},可用 {{ p['available'] }} {{ p['unit'] }})</option>
-            {% endfor %}
-        </select>
+        <input type="hidden" name="product_id" value="{{ picked_product['id'] }}">
+        <div class="pickcard">
+            <div><div class="nm">{{ picked_product['name'] }}</div>
+                 <div class="meta">{{ picked_product['sku'] }}　·　儲位 {{ picked_product['location'] or '未設定' }}</div></div>
+            <div class="right"><div class="big">{{ picked_product['available'] }}</div>
+                 <div class="meta">目前可用({{ picked_product['unit'] }})　·　<a href="{{ url_for('pick', to='reserve') }}">換一項料</a></div></div>
+        </div>
         <label>預留數量</label><input type="number" name="quantity" min="1" inputmode="numeric">
         <label>用途(工單／專案／客戶)</label><input type="text" name="purpose" placeholder="例:WO-1001">
         <input type="submit" value="建立預留">
     </form>
+    {% else %}
+    <p class="note">預留是把在庫的量綁給某張工單,綁住的量就不能被別人領走。</p>
+    <p><a class="btn" href="{{ url_for('pick', to='reserve') }}">先找要預留的料</a></p>
+    {% endif %}
 </div>
 
 <div class="detail-section">
     <h2>有效預留</h2>
     {% if rows %}
-    <table class="cards">
-        <tr><th>商品</th><th>SKU</th><th class="num">預留量</th><th>用途</th><th>建立者</th><th>建立時間</th><th>操作</th></tr>
-        {% for r in rows %}
-        <tr>
-            <td data-label="商品">{{ r['name'] }}</td>
-            <td data-label="SKU">{{ r['sku'] }}</td>
-            <td data-label="預留量" class="num">{{ r['quantity'] }}</td>
-            <td data-label="用途">{{ r['purpose'] or '—' }}</td>
-            <td data-label="建立者">{{ r['username'] }}</td>
-            <td data-label="建立時間">{{ r['created_local'] }}</td>
-            <td data-label="操作">
-                <form class="inline" method="post" action="{{ url_for('reservation_release', rid=r['id']) }}">
-                    <button class="small-btn ok-btn" type="submit">釋放</button>
-                </form>
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>商品</th><th>SKU</th><th class="num">預留量</th><th>用途</th><th>建立者</th><th>建立時間</th><th>操作</th></tr>
+            {% for r in rows %}
+            <tr>
+                <td data-label="商品">{{ r['name'] }}</td>
+                <td data-label="SKU">{{ r['sku'] }}</td>
+                <td data-label="預留量" class="num">{{ r['quantity'] }}</td>
+                <td data-label="用途">{{ r['purpose'] or '—' }}</td>
+                <td data-label="建立者">{{ r['username'] }}</td>
+                <td data-label="建立時間">{{ r['created_local'] }}</td>
+                <td data-label="操作">
+                    <form class="inline" method="post" action="{{ url_for('reservation_release', rid=r['id']) }}">
+                        <button class="small-btn ok-btn" type="submit">釋放</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>目前沒有有效的預留。</p>
     {% endif %}
@@ -2401,27 +2640,29 @@ PAGE_PLANNING = """
     </p>
 </div>
 
-<table class="cards">
-    <tr>
-        <th>SKU</th><th>名稱</th><th class="num">日均用量</th><th class="num">標準差</th>
-        <th class="num">前置期</th><th class="num">服務水準</th>
-        <th class="num">建議安全庫存</th><th class="num">再訂購點</th><th class="num">目前門檻</th><th>XYZ</th>
-    </tr>
-    {% for r in rows %}
-    <tr>
-        <td data-label="SKU">{{ r['sku'] }}</td>
-        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=r['id']) }}">{{ r['name'] }}</a></td>
-        <td data-label="日均用量" class="num">{{ r['mean_str'] }}</td>
-        <td data-label="標準差" class="num">{{ r['sd_str'] }}</td>
-        <td data-label="前置期" class="num">{{ r['lead_time_days'] }} 天</td>
-        <td data-label="服務水準" class="num">{{ r['service_level_str'] }}%</td>
-        <td data-label="建議安全庫存" class="num"><strong>{{ r['ss_str'] }}</strong></td>
-        <td data-label="再訂購點" class="num">{{ r['rop_str'] }}</td>
-        <td data-label="目前門檻" class="num">{{ r['low_stock_threshold'] }}</td>
-        <td data-label="XYZ">{{ r['xyz'] }}</td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="table-scroll">
+    <table class="cards">
+        <tr>
+            <th>SKU</th><th>名稱</th><th class="num">日均用量</th><th class="num">標準差</th>
+            <th class="num">前置期</th><th class="num">服務水準</th>
+            <th class="num">建議安全庫存</th><th class="num">再訂購點</th><th class="num">目前門檻</th><th>XYZ</th>
+        </tr>
+        {% for r in rows %}
+        <tr>
+            <td data-label="SKU">{{ r['sku'] }}</td>
+            <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=r['id']) }}">{{ r['name'] }}</a></td>
+            <td data-label="日均用量" class="num">{{ r['mean_str'] }}</td>
+            <td data-label="標準差" class="num">{{ r['sd_str'] }}</td>
+            <td data-label="前置期" class="num">{{ r['lead_time_days'] }} 天</td>
+            <td data-label="服務水準" class="num">{{ r['service_level_str'] }}%</td>
+            <td data-label="建議安全庫存" class="num"><strong>{{ r['ss_str'] }}</strong></td>
+            <td data-label="再訂購點" class="num">{{ r['rop_str'] }}</td>
+            <td data-label="目前門檻" class="num">{{ r['low_stock_threshold'] }}</td>
+            <td data-label="XYZ">{{ r['xyz'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 
 {% if has_suggestion and session.get('is_admin') %}
 <div class="detail-section">
@@ -2474,18 +2715,20 @@ PAGE_IMAGE_SEARCH = """
 <div class="detail-section">
     <h2>搜尋結果(相似度由高至低)</h2>
     {% if results %}
-    <table>
-        <tr><th>照片</th><th>SKU</th><th>名稱</th><th>相似度</th><th>目前庫存</th></tr>
-        {% for r in results %}
-        <tr>
-            <td><img class="thumb" src="{{ url_for('serve_image', filename=r['filename']) }}" alt=""></td>
-            <td>{{ r['sku'] }}</td>
-            <td><a class="plain" href="{{ url_for('product_detail', pid=r['product_id']) }}">{{ r['name'] }}</a></td>
-            <td>{{ r['similarity'] }}%</td>
-            <td>{{ r['quantity'] }} {{ r['unit'] }}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table>
+            <tr><th>照片</th><th>SKU</th><th>名稱</th><th>相似度</th><th>目前庫存</th></tr>
+            {% for r in results %}
+            <tr>
+                <td><img class="thumb" src="{{ url_for('serve_image', filename=r['filename']) }}" alt=""></td>
+                <td>{{ r['sku'] }}</td>
+                <td><a class="plain" href="{{ url_for('product_detail', pid=r['product_id']) }}">{{ r['name'] }}</a></td>
+                <td>{{ r['similarity'] }}%</td>
+                <td>{{ r['quantity'] }} {{ r['unit'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
     {% else %}
     <p>庫內尚無照片可比對,請先到商品詳細頁上傳物料照片。</p>
     {% endif %}
@@ -2522,12 +2765,14 @@ PAGE_IMPORT = """
 {% if report_rows is not none %}
 <div class="detail-section">
     <h2>匯入結果:成功匯入 {{ ok_count }} 筆,跳過 {{ skip_count }} 筆</h2>
-    <table>
-        <tr><th>行號</th><th>內容</th><th>結果</th></tr>
-        {% for r in report_rows %}
-        <tr><td>{{ r['line'] }}</td><td>{{ r['label'] }}</td><td>{{ r['status'] }}</td></tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table>
+            <tr><th>行號</th><th>內容</th><th>結果</th></tr>
+            {% for r in report_rows %}
+            <tr><td>{{ r['line'] }}</td><td>{{ r['label'] }}</td><td>{{ r['status'] }}</td></tr>
+            {% endfor %}
+        </table>
+    </div>
 </div>
 {% endif %}
 """
@@ -2569,7 +2814,7 @@ def register():
     username = ""
     if user_count() > 0:
         return render_page(PAGE_REGISTER, closed=True,
-                           error="系統已完成初始設定,不開放自助註冊。需要帳號請洽管理員建立。")
+                           error="系統已完成初始設定,不開放自助註冊。需要帳號請洽管理員建立。", page_title="建立管理員帳號")
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
@@ -2585,7 +2830,7 @@ def register():
                     return redirect(url_for("login"))
                 except sqlite3.IntegrityError:
                     error = "帳號已存在,請改用其他名稱"
-    return render_page(PAGE_REGISTER, error=error, username=username, closed=False)
+    return render_page(PAGE_REGISTER, error=error, username=username, closed=False, page_title="建立管理員帳號")
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -2619,7 +2864,7 @@ def login():
             prev = _login_fails.get(username, (0, 0.0))[0]
             _login_fails[username] = (prev + 1, time.time())
             error = "帳號或密碼錯誤"
-    return render_page(PAGE_LOGIN, error=error, username=username)
+    return render_page(PAGE_LOGIN, error=error, username=username, page_title="登入")
 
 
 @app.route("/users")
@@ -2630,7 +2875,7 @@ def users_page(error=None, msg=None):
         d = dict(u)
         d["created_local"] = fmt_local(u["created_at"])
         rows.append(d)
-    return render_page(PAGE_USERS, users=rows, error=error, msg=msg)
+    return render_page(PAGE_USERS, users=rows, error=error, msg=msg, page_title="帳號管理")
 
 
 @app.route("/users/new", methods=["POST"])
@@ -2724,7 +2969,7 @@ def audit_page():
         d["created_local"] = fmt_local(r["created_at"])
         rows.append(d)
     return render_page(PAGE_AUDIT, rows=rows, q=q,
-                       pager=build_pager("audit_page", page, has_next, q=q))
+                       pager=build_pager("audit_page", page, has_next, q=q), page_title="稽核紀錄")
 
 
 # 登出用 GET 是為了 curl 可測性的刻意簡化;本系統未實作 CSRF token,
@@ -2799,7 +3044,7 @@ def render_index(error=None, msg=None):
                        po_summary=po_summary, po_labels=PO_STATUS_LABEL,
                        po_summary_total=sum(v["orders"] for v in po_summary.values()),
                        pager=build_pager("index", page, has_next, q=q, category=category),
-                       error=error, msg=msg)
+                       error=error, msg=msg, page_title="庫存總覽")
 
 
 @app.route("/")
@@ -2843,7 +3088,7 @@ def alerts():
         except ValueError:
             d["days_left"] = 0
         expiring.append(d)
-    return render_page(PAGE_ALERTS, products=rows, expiring=expiring)
+    return render_page(PAGE_ALERTS, products=rows, expiring=expiring, page_title="短缺與效期")
 
 
 # ---------------------------------------------------------------------------
@@ -3067,7 +3312,7 @@ def render_product_detail(pid, error=None, msg=None):
     return render_page(PAGE_PRODUCT_DETAIL, p=p, images=images, aliases=aliases,
                        recent_tx=recent_tx, lots=lots, open_pos=open_pos,
                        onorder_total=sum(d["onorder"] for d in open_pos),
-                       error=error, msg=msg)
+                       error=error, msg=msg, page_title="商品明細", back_url=url_for('index'), back_label="回庫存總覽")
 
 
 @app.route("/products/<int:pid>")
@@ -3169,10 +3414,83 @@ def alias_delete(pid, aid):
 # 入庫 / 出庫
 # ---------------------------------------------------------------------------
 
-def product_dropdown():
-    return get_db().execute(
-        "SELECT id, name, sku, quantity, unit FROM products ORDER BY name"
-    ).fetchall()
+PICK_LIMIT = 20
+
+
+def pick_products(q):
+    """選料查詢:沿用首頁同一組條件(我方料號/品名/儲位/跨公司別名),最多 20 筆。
+    取代舊的 product_dropdown()——那是無 WHERE、無 LIMIT 的全表查詢,
+    實測在正式資料上產生 2,281 個 <option>,現場根本挑不到料。"""
+    q = (q or "").strip()
+    if not q:
+        # 沒有關鍵字時給「最近登記過的料」,現場最常見的就是連續處理同一批
+        return get_db().execute("""
+            SELECT p.*, s.name AS supplier_name FROM products p
+            LEFT JOIN suppliers s ON p.supplier_id = s.id
+            WHERE p.id IN (SELECT product_id FROM transactions ORDER BY id DESC LIMIT 60)
+            ORDER BY (SELECT MAX(id) FROM transactions t WHERE t.product_id = p.id) DESC
+            LIMIT ?""", (PICK_LIMIT,)).fetchall()
+    return query_products(q=q, limit=PICK_LIMIT)
+
+
+def product_or_none(pid):
+    p = safe_int(str(pid))
+    if p is None:
+        return None
+    row = get_db().execute("""
+        SELECT p.*, s.name AS supplier_name FROM products p
+        LEFT JOIN suppliers s ON p.supplier_id = s.id WHERE p.id = ?""", (p,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["reserved"] = reserved_map().get(d["id"], 0)
+    d["available"] = d["quantity"] - d["reserved"]
+    return d
+
+
+
+# ---------------------------------------------------------------------------
+# 選料(共用元件):先找料 → 再做事。取代全站五處的兩千項下拉選單
+# ---------------------------------------------------------------------------
+
+PICK_TARGETS = {
+    "in":      ("入庫登記 · 先找到料", "stock_in"),
+    "out":     ("出庫登記 · 先找到料", "stock_out"),
+    "history": ("異動歷史 · 先找到料", "history"),
+    "reserve": ("建立預留 · 先找到料", "reservations_page"),
+}
+
+
+@app.route("/pick")
+@login_required
+def pick():
+    to = request.args.get("to", "in")
+    q = request.args.get("q", "").strip()
+    extra, post_to, remember = {}, None, False
+    if to.startswith("order:"):
+        _, oid, item_id = to.split(":")
+        title = "指定我方商品 · 採購單"
+        post_to = url_for("order_item_map", oid=int(oid), item_id=int(item_id))
+        remember = True
+    elif to.startswith("receipt:"):
+        _, rid, item_id = to.split(":")
+        title = "指定我方商品 · 收貨單"
+        post_to = url_for("receipt_item_map", rid=int(rid), item_id=int(item_id))
+        remember = True
+    elif to in PICK_TARGETS:
+        title, endpoint = PICK_TARGETS[to]
+    else:
+        to, (title, endpoint) = "in", PICK_TARGETS["in"]
+
+    rows = pick_products(q)
+    # 掃碼槍的情境:掃到唯一一筆就直接進下一步,不用再點一次
+    if q and len(rows) == 1 and post_to is None:
+        return redirect(url_for(PICK_TARGETS[to][1], product_id=rows[0]["id"]))
+    link_base = "" if post_to else url_for(PICK_TARGETS[to][1]) + "?product_id="
+    return render_page(PAGE_PICK, title=title, page_title=title, narrow=True,
+                       to=to, q=q, rows=rows, extra=extra, post_to=post_to,
+                       remember=remember, link_base=link_base,
+                       truncated=(len(rows) >= PICK_LIMIT))
 
 
 def parse_stock_form():
@@ -3227,8 +3545,15 @@ def stock_done_msg(action):
 @app.route("/stock/in", methods=["GET", "POST"])
 @login_required
 def stock_in():
+    # 第一步(沒帶 product_id)一律導到共用選料頁,而不是塞一個兩千項的下拉選單。
+    # 舊網址只帶 done(登記成功的商品),仍當作 product_id 用,舊書籤才不會斷。
+    if request.method == "GET" and not request.args.get("product_id"):
+        if request.args.get("done"):
+            return redirect(url_for("stock_in", product_id=request.args.get("done"),
+                                    done=request.args.get("done"), qty=request.args.get("qty", "")))
+        return redirect(url_for("pick", to="in"))
     f = dict(EMPTY_STOCK_FORM)
-    f["product_id"] = request.args.get("product_id", "")  # 詳細頁連過來時預選商品
+    f["product_id"] = request.form.get("product_id") or request.args.get("product_id", "")
     error = None
     if request.method == "POST":
         f, error = parse_stock_form()
@@ -3242,7 +3567,6 @@ def stock_in():
             elif f["qty_unit"] == "purchase" and not (prow["purchase_unit"] or "").strip():
                 error = "此商品尚未設定採購單位,請先在商品編輯頁設定,或改用庫存單位輸入"
             else:
-                # 採購單位輸入時依換算率換成庫存單位(避免現場心算造成帳差)
                 if f["qty_unit"] == "purchase":
                     qty = qty * max(1, prow["units_per_purchase"] or 1)
                     if qty > MAX_QUANTITY:
@@ -3255,7 +3579,6 @@ def stock_in():
                     VALUES (?, ?, 'in', ?, ?, ?, ?)
                 """, (pid, session["user_id"], qty, f["note"], f["purpose"], ts))
                 tx_id = cur.lastrowid
-                # 每筆入庫建立一個批次(Lot Tracking);批號未填則自動編號
                 lot_no = f["lot_no"] or f"L{datetime.now(timezone.utc).strftime('%Y%m%d')}-{tx_id}"
                 try:
                     db.execute("""
@@ -3269,17 +3592,24 @@ def stock_in():
                     error = "此商品已有相同批號,請改用其他批號"
                 else:
                     db.commit()
-                    return redirect(url_for("stock_in", done=pid, qty=qty))
-    return render_page(PAGE_STOCK_FORM, title="入庫登記", f=f, is_in=True,
-                       product_list=product_dropdown(), error=error,
-                       msg=stock_done_msg("入庫"))
+                    # 一定要把 product_id 帶回去。舊版只帶 done/qty,GET 時 product_id 是空字串,
+                    # 瀏覽器就會自動選中排序第一筆的商品——成功訊息還停在上一筆,
+                    # 使用者打完數量送出,貨就入到完全不相干的料號上了。
+                    return redirect(url_for("stock_in", product_id=pid, done=pid, qty=qty))
+    return render_stock_form(True, f, error)
 
 
 @app.route("/stock/out", methods=["GET", "POST"])
 @login_required
 def stock_out():
+    # 舊網址只帶 done(登記成功的商品),仍當作 product_id 用,舊書籤才不會斷
+    if request.method == "GET" and not request.args.get("product_id"):
+        if request.args.get("done"):
+            return redirect(url_for("stock_out", product_id=request.args.get("done"),
+                                    done=request.args.get("done"), qty=request.args.get("qty", "")))
+        return redirect(url_for("pick", to="out"))
     f = dict(EMPTY_STOCK_FORM)
-    f["product_id"] = request.args.get("product_id", "")
+    f["product_id"] = request.form.get("product_id") or request.args.get("product_id", "")
     error = None
     if request.method == "POST":
         f, error = parse_stock_form()
@@ -3290,14 +3620,26 @@ def stock_out():
             if row is None:
                 error = "找不到指定的商品"
             else:
-                # 原子更新:條件帶 quantity >= ?,不足時 rowcount 為 0,杜絕負庫存
-                updated = db.execute(
-                    "UPDATE products SET quantity = quantity - ? WHERE id = ? AND quantity >= ?",
-                    (qty, pid, qty),
-                ).rowcount
+                # 原子更新的條件是「可用量」而不是現貨:已被工單預留的量不該被領走。
+                # 舊版寫 quantity >= ?,預留形同虛設。
+                updated = db.execute("""
+                    UPDATE products SET quantity = quantity - ?
+                    WHERE id = ? AND quantity - COALESCE(
+                        (SELECT SUM(r.quantity) FROM reservations r
+                         WHERE r.product_id = products.id AND r.status = 'active'), 0) >= ?
+                """, (qty, pid, qty)).rowcount
                 if updated == 0:
                     db.rollback()
-                    error = f"庫存不足,無法出庫(目前庫存:{row['quantity']},要求出庫:{qty})"
+                    resv = reserved_map().get(pid, 0)
+                    # 訊息要說實話:沒有預留時擋下來的就是庫存不足;
+                    # 有預留時才是可用量不足,而且要把三個數字都寫出來,
+                    # 否則使用者看到「庫存 100 卻領不到 70」會以為系統壞了
+                    if resv:
+                        error = (f"可用量不足,無法出庫(現貨 {row['quantity']}、"
+                                 f"已預留 {resv}、可用 {row['quantity'] - resv},要求出庫 {qty})")
+                    else:
+                        error = (f"庫存不足,無法出庫(目前庫存:{row['quantity']},"
+                                 f"要求出庫:{qty})")
                 else:
                     ts = now_str()
                     cur = db.execute("""
@@ -3307,10 +3649,109 @@ def stock_out():
                     tx_id = cur.lastrowid
                     consume_lots(db, pid, qty, tx_id, ts)
                     db.commit()
-                    return redirect(url_for("stock_out", done=pid, qty=qty))
-    return render_page(PAGE_STOCK_FORM, title="出庫登記", f=f, is_in=False,
-                       product_list=product_dropdown(), error=error,
-                       msg=stock_done_msg("出庫"))
+                    return redirect(url_for("stock_out", product_id=pid, done=pid, qty=qty))
+    return render_stock_form(False, f, error)
+
+
+def recent_moves(pid, limit=10):
+    """登記頁下半的「本次已登記」:最近 N 筆,每筆可直接沖銷。
+    全站原本沒有任何更正入口,打錯只能反向出庫——那會讓 FIFO 扣到錯的批,
+    把批號、成本與效期一起改壞。"""
+    db = get_db()
+    rows = db.execute("""
+        SELECT t.*, u.username,
+               CASE WHEN t.type = 'in'
+                    THEN (SELECT l.lot_no FROM lots l WHERE l.transaction_id = t.id)
+                    ELSE (SELECT GROUP_CONCAT(l2.lot_no || '×' || c.quantity, '、')
+                          FROM lot_consumptions c JOIN lots l2 ON c.lot_id = l2.id
+                          WHERE c.transaction_id = t.id)
+               END AS lot_info,
+               (SELECT 1 FROM transactions r WHERE r.reverses = t.id) AS reversed
+        FROM transactions t JOIN users u ON t.user_id = u.id
+        WHERE t.product_id = ? ORDER BY t.id DESC LIMIT ?
+    """, (pid, limit)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["local_time"] = fmt_local(r["created_at"])
+        d["is_reversal"] = bool(r["reverses"])
+        out.append(d)
+    return out
+
+
+def render_stock_form(is_in, f, error):
+    prod = product_or_none(f.get("product_id"))
+    if prod is None:
+        return redirect(url_for("pick", to="in" if is_in else "out"))
+    title = "入庫登記" if is_in else "出庫登記"
+    return render_page(PAGE_STOCK_FORM, title=title, page_title=f"{title}:{prod['name']}",
+                       narrow=True, f=f, is_in=is_in, prod=prod, error=error,
+                       recent=recent_moves(prod["id"]),
+                       msg=stock_done_msg(title[:2]),
+                       back_url=url_for("pick", to="in" if is_in else "out"),
+                       back_label="換一項料")
+
+
+@app.route("/transactions/<int:tid>/reverse", methods=["POST"])
+@login_required
+def transaction_reverse(tid):
+    """沖銷一筆異動:把庫存與批次帳都還原到登記前,而不是再開一筆反向異動。
+    反向出庫會讓 FIFO 去扣真正最早的那一批,把批號、成本與效期一起改壞。"""
+    db = get_db()
+    t = db.execute("SELECT * FROM transactions WHERE id = ?", (tid,)).fetchone()
+    back = url_for("stock_in" if (t and t["type"] == "in") else "stock_out",
+                   product_id=(t["product_id"] if t else 0))
+    if t is None:
+        return render_page(PAGE_PICK, title="沖銷", narrow=True,
+                           to="in", q="", rows=[], extra={}, post_to=None,
+                           remember=False, link_base="", truncated=False,
+                           error="找不到這筆異動")
+
+    def fail(msg):
+        f = dict(EMPTY_STOCK_FORM); f["product_id"] = str(t["product_id"])
+        return render_stock_form(t["type"] == "in", f, msg)
+
+    if t["reverses"]:
+        return fail("這筆本身就是沖銷紀錄,不能再沖銷")
+    if db.execute("SELECT 1 FROM transactions WHERE reverses = ?", (tid,)).fetchone():
+        return fail("這筆異動已經沖銷過了")
+    if t["user_id"] != session.get("user_id") and not session.get("is_admin"):
+        return render_page(
+            "<h1>沒有權限</h1><p>只有登記者本人或管理員可以沖銷這筆異動。</p>"
+            "<p><a class=\"btn ghost\" href=\"{{ url_for('index') }}\">回庫存總覽</a></p>",
+            title="沒有權限", page_title="沒有權限", narrow=True), 403
+    ts = now_str()
+    if t["type"] == "in":
+        lot = db.execute("SELECT * FROM lots WHERE transaction_id = ?", (tid,)).fetchone()
+        if lot is None:
+            return fail("找不到這筆入庫建立的批次,無法安全沖銷")
+        if lot["qty_remaining"] != lot["qty_received"]:
+            used = lot["qty_received"] - lot["qty_remaining"]
+            return fail(f"這批已經被領用 {used},不能整筆沖銷。請改以出庫更正,或先沖銷後續的出庫")
+        upd = db.execute("UPDATE products SET quantity = quantity - ? WHERE id = ? AND quantity >= ?",
+                         (t["quantity"], t["product_id"], t["quantity"])).rowcount
+        if upd == 0:
+            db.rollback()
+            return fail("目前庫存已低於這筆入庫量,無法沖銷")
+        db.execute("DELETE FROM lots WHERE id = ?", (lot["id"],))
+        rtype = "out"
+    else:
+        for c in db.execute("SELECT * FROM lot_consumptions WHERE transaction_id = ?", (tid,)).fetchall():
+            db.execute("UPDATE lots SET qty_remaining = qty_remaining + ? WHERE id = ?",
+                       (c["quantity"], c["lot_id"]))
+        db.execute("DELETE FROM lot_consumptions WHERE transaction_id = ?", (tid,))
+        db.execute("UPDATE products SET quantity = quantity + ? WHERE id = ?",
+                   (t["quantity"], t["product_id"]))
+        rtype = "in"
+    db.execute("""
+        INSERT INTO transactions (product_id, user_id, type, quantity, note, purpose, created_at, reverses)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (t["product_id"], session["user_id"], rtype, t["quantity"],
+          f"沖銷異動 #{tid}", t["purpose"] or "", ts, tid))
+    audit("沖銷異動", "transaction", tid,
+          f"{'入庫' if t['type'] == 'in' else '出庫'} {t['quantity']}")
+    db.commit()
+    return redirect(back + f"&done_reverse={tid}" if "?" in back else back)
 
 
 # ---------------------------------------------------------------------------
@@ -3324,6 +3765,7 @@ def history_filters():
         "start": request.args.get("start", "").strip(),
         "end": request.args.get("end", "").strip(),
         "purpose": request.args.get("purpose", "").strip(),
+        "pq": request.args.get("pq", "").strip(),
     }
 
 
@@ -3348,6 +3790,11 @@ def query_transactions(filters, limit=None, offset=0):
     if pid is not None:
         sql += " AND t.product_id = ?"
         params.append(pid)
+    elif filters.get("pq"):
+        # 文字篩選商品:比對我方料號、品名、儲位(取代舊的兩千項下拉選單)
+        like = f"%{filters['pq']}%"
+        sql += " AND (p.sku LIKE ? OR p.name LIKE ? OR p.location LIKE ?)"
+        params += [like, like, like]
     if filters["type"] in ("in", "out"):
         sql += " AND t.type = ?"
         params.append(filters["type"])
@@ -3385,8 +3832,8 @@ def history():
         d = dict(r)
         d["created_local"] = fmt_local(r["created_at"])
         rows.append(d)
-    return render_page(PAGE_HISTORY, rows=rows, filters=filters,
-                       product_list=product_dropdown(),
+    return render_page(PAGE_HISTORY, rows=rows, filters=filters, title="異動歷史",
+                       picked_product=product_or_none(filters["product_id"]),
                        pager=build_pager("history", page, has_next, **filters))
 
 
@@ -3416,7 +3863,7 @@ def suppliers():
         SELECT s.*, (SELECT COUNT(*) FROM products p WHERE p.supplier_id = s.id) AS product_count
         FROM suppliers s ORDER BY s.id
     """).fetchall()
-    return render_page(PAGE_SUPPLIERS, rows=rows)
+    return render_page(PAGE_SUPPLIERS, rows=rows, page_title="供應商")
 
 
 @app.route("/suppliers/new", methods=["GET", "POST"])
@@ -3565,7 +4012,7 @@ def report():
         total_out=sum(r["total_out"] for r in rows),
         total_net=sum(r["net"] for r in rows),
         total_qty=sum(r["quantity"] for r in rows),
-        total_value_str=fmt_money(total_value),
+        total_value_str=fmt_money(total_value), page_title="庫存報表",
     )
 
 
@@ -3613,7 +4060,7 @@ def image_search():
                         results.append(s)
                         if len(results) >= 10:
                             break
-    return render_page(PAGE_IMAGE_SEARCH, results=results, has_pil=HAS_PIL, error=error)
+    return render_page(PAGE_IMAGE_SEARCH, results=results, has_pil=HAS_PIL, error=error, page_title="以圖找料")
 
 
 # ---------------------------------------------------------------------------
@@ -3650,7 +4097,7 @@ def counts_page(error=None, msg=None):
     categories = [r["category"] for r in db.execute(
         "SELECT DISTINCT category FROM products WHERE category != '' ORDER BY category").fetchall()]
     return render_page(PAGE_COUNTS, rows=rows, categories=categories,
-                       today=today_local().isoformat(), error=error, msg=msg)
+                       today=today_local().isoformat(), error=error, msg=msg, page_title="循環盤點")
 
 
 @app.route("/counts/new", methods=["POST"])
@@ -3716,7 +4163,7 @@ def render_count_detail(cid, error=None, msg=None):
     counted = sum(1 for i in items if i["counted_qty"] is not None)
     diff_count = sum(1 for i in items if i["diff"] not in (None, 0))
     return render_page(PAGE_COUNT_DETAIL, c=cd, items=items, total=len(items),
-                       counted=counted, diff_count=diff_count, error=error, msg=msg)
+                       counted=counted, diff_count=diff_count, error=error, msg=msg, page_title="盤點單", back_url=url_for('counts_page'), back_label="回盤點單清單")
 
 
 @app.route("/counts/<int:cid>")
@@ -3868,7 +4315,7 @@ def orders_page(error=None, msg=None):
                        suppliers=db.execute("SELECT id, name FROM suppliers ORDER BY name").fetchall(),
                        summary=po_status_summary(), labels=PO_STATUS_LABEL,
                        status_filter=status if status in PO_STATUS_LABEL else "",
-                       error=error, msg=msg)
+                       error=error, msg=msg, page_title="採購單")
 
 
 @app.route("/orders/template.csv")
@@ -3956,8 +4403,7 @@ def render_order_detail(oid, error=None, msg=None):
                        ordered_total=ordered_total, received_total=received_total,
                        onorder_total=onorder_total, receipts=receipts,
                        labels=PO_STATUS_LABEL, step_index=step,
-                       today=today_local().isoformat(),
-                       product_list=product_dropdown(), error=error, msg=msg)
+                       today=today_local().isoformat(), error=error, msg=msg, page_title="採購單明細", back_url=url_for('orders_page'), back_label="回採購單清單")
 
 
 @app.route("/orders/<int:oid>")
@@ -4197,7 +4643,7 @@ def receipts_page(error=None, msg=None):
         d["created_local"] = fmt_local(r["created_at"])
         rows.append(d)
     suppliers = db.execute("SELECT id, name FROM suppliers ORDER BY name").fetchall()
-    return render_page(PAGE_RECEIPTS, rows=rows, suppliers=suppliers, error=error, msg=msg)
+    return render_page(PAGE_RECEIPTS, rows=rows, suppliers=suppliers, error=error, msg=msg, page_title="收貨單")
 
 
 @app.route("/receipts/template.csv")
@@ -4279,7 +4725,7 @@ def render_receipt_detail(rid, error=None, msg=None):
     total_qty = sum(i["expected_qty"] for i in items)
     return render_page(PAGE_RECEIPT_DETAIL, r=rd, items=items, total=len(items),
                        checked=checked, unmatched=unmatched, total_qty=total_qty,
-                       product_list=product_dropdown(), error=error, msg=msg)
+                       error=error, msg=msg, page_title="收貨單明細", back_url=url_for('receipts_page'), back_label="回收貨單清單")
 
 
 @app.route("/receipts/<int:rid>")
@@ -4440,12 +4886,6 @@ def receipt_cancel(rid):
 @login_required
 def reservations_page(error=None, msg=None):
     db = get_db()
-    resv = reserved_map()
-    product_list = []
-    for p in db.execute("SELECT id, name, sku, quantity, unit FROM products ORDER BY name").fetchall():
-        d = dict(p)
-        d["available"] = p["quantity"] - resv.get(p["id"], 0)
-        product_list.append(d)
     rows = []
     for r in db.execute("""
             SELECT r.*, p.name, p.sku FROM reservations r JOIN products p ON r.product_id = p.id
@@ -4454,7 +4894,8 @@ def reservations_page(error=None, msg=None):
         d = dict(r)
         d["created_local"] = fmt_local(r["created_at"])
         rows.append(d)
-    return render_page(PAGE_RESERVATIONS, rows=rows, product_list=product_list,
+    return render_page(PAGE_RESERVATIONS, rows=rows, title="預留",
+                       picked_product=product_or_none(request.args.get("product_id", "")),
                        error=error, msg=msg)
 
 
@@ -4528,7 +4969,7 @@ def planning_page(error=None, msg=None):
     rows = planning_rows()
     return render_page(PAGE_PLANNING, rows=rows, window=USAGE_WINDOW_DAYS,
                        has_suggestion=any(r["ss"] is not None for r in rows),
-                       error=error, msg=msg)
+                       error=error, msg=msg, page_title="補貨規劃")
 
 
 @app.route("/planning/apply", methods=["POST"])
@@ -4569,7 +5010,7 @@ def product_qr(pid):
 def labels_page():
     products = get_db().execute(
         "SELECT id, sku, name, location FROM products ORDER BY location, sku").fetchall()
-    return render_page(PAGE_LABELS, products=products, has_qrcode=HAS_QRCODE)
+    return render_page(PAGE_LABELS, products=products, has_qrcode=HAS_QRCODE, page_title="料架標籤")
 
 
 # ---------------------------------------------------------------------------
@@ -4761,7 +5202,7 @@ def csv_import():
                 db.commit()
     return render_page(PAGE_IMPORT, report_rows=report_rows, ok_count=ok_count,
                        skip_count=skip_count, error=error, has_openpyxl=HAS_OPENPYXL,
-                       msg=f"成功匯入 {ok_count} 筆,跳過 {skip_count} 筆" if report_rows is not None and not error else None)
+                       msg=f"成功匯入 {ok_count} 筆,跳過 {skip_count} 筆" if report_rows is not None and not error else None, page_title="CSV 匯入")
 
 
 # ---------------------------------------------------------------------------
