@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.09.04"
+APP_VERSION = "2026.09.05"
 
 app = Flask(__name__)
 
@@ -868,7 +868,7 @@ LAYOUT = """
         /* ── 頂列:品牌 + 全站搜尋 + 使用者。搜尋在每一頁的同一個位置 ── */
         .topbar { position: sticky; top: 0; z-index: 40; background: var(--hull);
                   display: flex; align-items: center; gap: var(--s4);
-                  padding: 0 var(--s4); height: 52px; border-bottom: 1px solid var(--hull-3); }
+                  padding: 0 var(--s4); height: 48px; border-bottom: 1px solid var(--hull-3); }
         .topbar .brand { display: flex; align-items: center; gap: var(--s2); color: #fff;
                          text-decoration: none; font-size: var(--t3); font-weight: 700; white-space: nowrap; }
         .topbar .brand-mark { width: 9px; height: 20px; background: var(--amber);
@@ -878,7 +878,7 @@ LAYOUT = """
         .gsearch svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
                        width: 17px; height: 17px; color: var(--search-icon); pointer-events: none; }
         .topbar .gsearch input[type=search] {
-            width: 100%; height: 36px; margin: 0; padding: 0 var(--s3) 0 36px;
+            width: 100%; height: 32px; margin: 0; padding: 0 var(--s3) 0 34px;
             font: inherit; font-size: var(--t2); color: var(--on-hull);
             background: var(--hull-2); border: 1px solid var(--hull-3);
             border-radius: var(--r-ctl); -webkit-appearance: none; }
@@ -889,10 +889,10 @@ LAYOUT = """
         .user-info a { color: var(--on-hull-2); }
 
         /* ── 導覽:倉庫語彙分組,零 JS 的 details ── */
-        nav { position: sticky; top: 52px; z-index: 35; background: var(--hull-2);
+        nav { position: sticky; top: 48px; z-index: 35; background: var(--hull-2);
               display: flex; padding: 0 var(--s4); border-bottom: 1px solid var(--hull-3); }
         nav > a.top, nav summary { display: flex; align-items: center; padding: 0 var(--s3);
-              height: 38px; color: var(--on-hull-2); text-decoration: none;
+              height: 34px; color: var(--on-hull-2); text-decoration: none;
               font-size: var(--t2); font-weight: 400; border-bottom: 3px solid transparent;
               cursor: pointer; white-space: nowrap; }
         nav > a.top:hover, nav summary:hover { color: #fff; }
@@ -918,19 +918,20 @@ LAYOUT = """
         /* ── 待辦帶:招牌元素,全站常駐。四格全部是可以「數」的件數 ── */
         .rail { background: var(--hull); display: grid; grid-template-columns: repeat(4, 1fr);
                 border-bottom: 1px solid var(--hull-3); }
-        .rail a { display: block; padding: 10px var(--s4) 11px; text-decoration: none;
+        .rail a { display: block; padding: 4px var(--s4) 5px; text-decoration: none;
                   color: var(--on-hull); border-left: 1px solid var(--hull-3);
                   position: relative; transition: background .15s var(--ease); }
         .rail a:first-child { border-left: none; }
         .rail a::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0;
                           width: 4px; background: var(--hull-3); }
         .rail a:hover { background: var(--hull-2); }
-        .rail .k { display: block; font-size: var(--t2); color: var(--on-hull-2); line-height: 1.4; }
-        .rail .v { display: block; margin-top: 2px; font-size: 28px; font-weight: 700;
-                   line-height: 1.15; font-family: var(--font-code);
+        .rail .k { display: block; font-size: var(--t1); color: var(--on-hull-2); line-height: 1.35; }
+        .rail .v { display: block; font-size: 21px; font-weight: 700;
+                   line-height: 1.2; font-family: var(--font-code);
                    font-variant-numeric: tabular-nums; }
         .rail .v .unit { color: var(--on-hull-2); }
-        .rail .s { display: block; font-size: var(--t1); color: var(--on-hull-2); }
+        .rail .s { display: block; font-size: 11px; line-height: 1.35; color: var(--on-hull-2);
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         /* 語意色:琥珀=等你動手、靛藍=純資訊、紅=壞消息、灰=沒事 */
         .rail .act::before { background: var(--amber); }
         .rail .act .v { color: var(--amber); }
@@ -939,8 +940,8 @@ LAYOUT = """
         .rail .bad::before { background: var(--fault); }
         .rail .bad .v { color: #f2909a; }
         .rail .none::before { background: var(--hull-3); }
-        .rail .none .v { color: var(--on-hull-2); font-size: var(--t4);
-                         font-weight: 400; font-family: var(--font-ui); }
+        .rail .none .v { color: var(--on-hull-2); font-size: var(--t3);
+                         font-weight: 400; font-family: var(--font-ui); line-height: 1.5; }
         /* ── 庫齡長條:純 CSS,不引入任何圖表函式庫 ── */
         .bars { display: flex; flex-direction: column; gap: var(--s2); }
         .bar { display: grid; grid-template-columns: 92px 1fr 76px; align-items: center;
@@ -964,13 +965,30 @@ LAYOUT = """
         .crumb a:hover { text-decoration: underline; }
         h1 { font-size: var(--t5); font-weight: 700; margin: 0 0 var(--s4);
              line-height: 1.35; color: var(--text); }
+        /* 標題與該頁的動作放同一排:同層級的東西不另起一排,省一整條帶 */
+        .head { display: flex; align-items: baseline; gap: var(--s4);
+                flex-wrap: wrap; margin: 0 0 var(--s4); }
+        .head h1 { margin: 0; }
+        .head .acts { margin-left: auto; display: flex; flex-wrap: wrap;
+                      gap: var(--s3); font-size: var(--t2); }
+        .head .acts a { color: var(--transit-text); text-decoration: none; }
+        .head .acts a:hover { text-decoration: underline; }
         h2 { font-size: var(--t4); font-weight: 700; margin: var(--s6) 0 var(--s3); line-height: 1.45; }
         .pane { background: var(--card); border: 1px solid var(--line);
                 border-radius: var(--r-pane); box-shadow: var(--sh-1);
                 margin-bottom: var(--s5); overflow: hidden; }
         .pane-h { display: flex; align-items: center; gap: var(--s3); background: var(--hull);
                   color: var(--on-hull); padding: 10px var(--s4); font-size: var(--t2); font-weight: 700; }
-        .pane-h .r { margin-left: auto; font-weight: 400; color: var(--on-hull-2); font-size: var(--t2); }
+        .pane-h .r { margin-left: auto; font-weight: 400; color: var(--on-hull-2);
+                     font-size: var(--t2); display: flex; align-items: center; gap: var(--s3); }
+        /* 面板標題列內的控件要壓扁,否則一條標題列會被撐成兩倍高 */
+        .pane-h .filters { margin: 0; gap: var(--s2); }
+        .pane-h .filters select, .pane-h .filters input[type=submit] {
+            height: 26px; min-height: 26px; margin: 0; padding: 0 var(--s2);
+            font-size: var(--t2); border-radius: 3px; }
+        .pane-h .filters select { background: var(--hull-2); color: var(--on-hull);
+                                  border-color: var(--hull-3); max-width: 180px; }
+        .pane-h .filters input[type=submit] { padding: 0 var(--s3); }
         .pane-h a { color: var(--amber); text-decoration: none; }
         .pane-b { padding: var(--s4); }
         .pane-b.flush { padding: 0; }
@@ -999,6 +1017,12 @@ LAYOUT = """
         tr.low-stock td { background: var(--fault-soft); }
         tr.lot-empty td { color: var(--mute); }
         tr.has-diff td { background: var(--amber-soft); }
+        /* 剛儲存的那一列高亮:舊版一列一送出後跳回最頂端,
+           現場在第 40 列存完要自己捲回去確認存到沒有 */
+        tr:target td { background: var(--transit-soft); box-shadow: inset 0 2px 0 var(--transit),
+                       inset 0 -2px 0 var(--transit); }
+        tr:target td:first-child { box-shadow: inset 4px 0 0 var(--transit),
+                       inset 0 2px 0 var(--transit), inset 0 -2px 0 var(--transit); }
         td[id^="qty-"] { font-family: var(--font-code); font-variant-numeric: tabular-nums;
                          font-weight: 700; font-size: var(--t3); color: var(--text); }
         td[data-label="SKU"], td[data-label="料號"], td[data-label="儲位"],
@@ -1012,7 +1036,8 @@ LAYOUT = """
         td[data-label="狀態"], td[data-label="時間(台灣)"], td[data-label="批號"] {
             white-space: nowrap; text-overflow: ellipsis; overflow: hidden; max-width: 160px; }
         /* 操作欄:橫排不斷字,並釘在表格右緣——橫捲時最常用的那欄不該被推出畫面 */
-        td[data-label="操作"], th:last-child { white-space: nowrap; }
+        td[data-label="操作"], td[data-label="單列"], th:last-child { white-space: nowrap; }
+        td[data-label="單列"] .small-btn { white-space: nowrap; }
         td[data-label="操作"] a.plain { margin-right: var(--s2); font-weight: 700; }
         .table-scroll td[data-label="操作"], .table-scroll th:last-child {
             position: sticky; right: 0; z-index: 1;
@@ -1518,40 +1543,35 @@ PAGE_LOGIN = """
 """
 
 PAGE_INDEX = """
-<h1>庫存總覽</h1>
-<form method="get" class="hero-search">
-    <span class="search-field">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
-        <label class="sr-only" for="hq">搜尋料號、品名、儲位或任一公司的別名料號</label>
-        <input id="hq" type="text" name="q" placeholder="輸入料號、品名、儲位或任一公司的別名料號" value="{{ q }}">
-    </span>
-    <select name="category">
-        <option value="">全部分類</option>
-        {% for c in categories %}
-        <option value="{{ c }}" {% if c == category %}selected{% endif %}>{{ c }}</option>
-        {% endfor %}
-    </select>
-    {% if cols_full %}<input type="hidden" name="cols" value="full">{% endif %}
-    {% if missing %}<input type="hidden" name="missing" value="1">{% endif %}
-    <input type="submit" value="搜尋">
-</form>
-<p class="sub-links">
-    <a class="plain" href="{{ url_for('index') }}">清除搜尋</a> ・
-    {% if cols_full %}
-    <a class="plain" href="{{ url_for('index', q=q, category=category, missing=(1 if missing else None)) }}">只看常用 7 欄</a>
-    {% else %}
-    <a class="plain" href="{{ url_for('index', q=q, category=category, cols='full', missing=(1 if missing else None)) }}">顯示全部欄位</a>
-    {% endif %} ・
-    {% if missing %}
-    <a class="plain" href="{{ url_for('index', q=q, category=category) }}">看全部商品</a>
-    {% else %}
-    <a class="plain" href="{{ url_for('index', missing=1) }}">只看資料待補的</a>
-    {% endif %} ・
-    <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
-</p>
+<div class="head">
+    <h1>{% if missing %}資料待補的商品{% elif q %}符合「{{ q }}」的商品{% elif category %}分類:{{ category }}{% else %}全部商品{% endif %}</h1>
+    <div class="acts">
+        {% if q or category or missing %}<a href="{{ url_for('index') }}">看全部商品</a>{% else %}<a href="{{ url_for('index', missing=1) }}">只看資料待補</a>{% endif %}
+        {% if cols_full %}
+        <a href="{{ url_for('index', q=q, category=category, missing=(1 if missing else None)) }}">只看常用 7 欄</a>
+        {% else %}
+        <a href="{{ url_for('index', q=q, category=category, cols='full', missing=(1 if missing else None)) }}">顯示全部欄位</a>
+        {% endif %}
+        <a href="{{ url_for('export_inventory') }}">匯出 CSV</a>
+    </div>
+</div>
 {% if rows %}
 <div class="pane">
-    <div class="pane-h">{% if missing %}資料待補的商品{% elif q or category %}符合條件的商品{% else %}庫存清單{% endif %}<span class="r">第 {{ page }} 頁</span></div>
+    <div class="pane-h">庫存清單<span class="r">
+        <form method="get" class="filters" style="margin:0">
+            {% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}
+            {% if cols_full %}<input type="hidden" name="cols" value="full">{% endif %}
+            {% if missing %}<input type="hidden" name="missing" value="1">{% endif %}
+            <label class="sr-only" for="cat">依分類篩選</label>
+            <select id="cat" name="category">
+                <option value="">全部分類</option>
+                {% for c in categories %}
+                <option value="{{ c }}" {% if c == category %}selected{% endif %}>{{ c }}</option>
+                {% endfor %}
+            </select>
+            <input type="submit" value="套用">
+        </form>
+        第 {{ page }} 頁</span></div>
     <div class="table-scroll">
         <table class="cards">
             <tr>
@@ -2315,7 +2335,9 @@ PAGE_COUNTS = """
             <option value="C">僅 C 類(建議每季)</option>
             <option value="category">指定分類</option>
         </select>
-        <label>分類(範圍選「指定分類」時適用)</label>
+        <label for="cloc">儲位前綴(範圍選「指定儲位」時適用)</label>
+    <input id="cloc" class="w-code" type="text" name="location" placeholder="例:CE、D-15">
+    <label>分類(範圍選「指定分類」時適用)</label>
         <select name="category">
             <option value="">(不指定)</option>
             {% for c in categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
@@ -2351,61 +2373,112 @@ PAGE_COUNTS = """
 """
 
 PAGE_COUNT_DETAIL = """
-<h1>盤點單:{{ c['name'] }}</h1>
-<p class="note">
-    範圍 {{ c['scope'] }}・建立於 {{ c['created_local'] }}({{ c['username'] }})・
-    {% if c['status'] == 'posted' %}<strong>已於 {{ c['posted_local'] }} 過帳,準確率 {{ c['accuracy_str'] }}%</strong>
-    {% else %}狀態:盤點中(輸入實盤數後由管理員過帳修正庫存){% endif %}
-</p>
-
+<div class="head">
+    <h1>盤點單:{{ c['name'] }}</h1>
+    <div class="acts">
+        <span class="chip {{ 'ok' if c['status'] == 'posted' else 'act' }}">{{ '已過帳' if c['status'] == 'posted' else '進行中' }}</span>
+        <span>建立於 {{ c['created_local'] }}</span>
+        {% if c['status'] == 'posted' %}<span>準確率 {{ c['accuracy_str'] }}%</span>{% endif %}
+    </div>
+</div>
 <div class="stat-row">
-    <div class="stat-box"><div class="stat-num">{{ total }}</div><div class="stat-cap">盤點品項</div></div>
-    <div class="stat-box"><div class="stat-num">{{ counted }}</div><div class="stat-cap">已盤</div></div>
-    <div class="stat-box"><div class="stat-num" style="color:#b91c1c">{{ diff_count }}</div><div class="stat-cap">有差異</div></div>
+    <div class="stat-box"><div class="stat-cap">明細品項</div><div class="stat-num">{{ total }}</div></div>
+    <div class="stat-box {{ 'good' if counted == total else 'warn' }}"><div class="stat-cap">已盤點</div><div class="stat-num">{{ counted }}</div></div>
+    <div class="stat-box {{ 'bad' if diff_count else 'good' }}"><div class="stat-cap">有差異</div><div class="stat-num">{{ diff_count }}</div></div>
+    <div class="stat-box"><div class="stat-cap">尚未盤點</div><div class="stat-num">{{ total - counted }}</div></div>
 </div>
 
-<div class="table-scroll">
-    <table class="cards">
-        <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">系統帳</th><th class="num">實盤數</th><th class="num">差異</th><th>備註</th></tr>
-        {% for i in items %}
-        <tr{% if i['diff'] is not none and i['diff'] != 0 %} class="has-diff"{% endif %}>
-            <td data-label="SKU">{{ i['sku'] }}</td>
-            <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['name'] }}</a></td>
-            <td data-label="儲位">{{ i['location'] or '—' }}</td>
-            <td data-label="系統帳" class="num">{{ i['system_qty'] }}</td>
-            <td data-label="實盤數" class="num">
-                {% if c['status'] == 'posted' %}{{ i['counted_qty'] if i['counted_qty'] is not none else '—' }}
-                {% else %}
-                <form class="inline count-form" method="post" action="{{ url_for('count_record', cid=c['id']) }}">
-                    <input type="hidden" name="product_id" value="{{ i['product_id'] }}">
-                    <input type="number" name="counted_qty" min="0" inputmode="numeric" class="count-input"
-                           value="{{ i['counted_qty'] if i['counted_qty'] is not none else '' }}">
-                    <input type="text" name="note" class="count-note" placeholder="差異原因" value="{{ i['note'] }}">
-                    <button class="small-btn ok-btn" type="submit">記錄</button>
-                </form>
-                {% endif %}
-            </td>
-            <td data-label="差異" class="num">{% if i['diff'] is not none %}{{ '%+d' % i['diff'] }}{% else %}—{% endif %}</td>
-            <td data-label="備註">{{ i['note'] }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-</div>
-
-{% if c['status'] != 'posted' and session.get('is_admin') %}
-<div class="detail-section">
-    <h2>過帳</h2>
-    <p class="note">
-        過帳會依實盤數修正庫存:盤虧依出庫策略消耗批次、盤盈建立調整批,並產生「盤點調整」異動與稽核紀錄。
-        未填實盤數的品項會被略過。過帳後不可再修改。
-    </p>
-    <form method="post" action="{{ url_for('count_post', cid=c['id']) }}"
-          onsubmit="return confirm('確定過帳?將依實盤數修正 {{ diff_count }} 項商品的庫存,且不可復原。');">
-        <input type="submit" value="過帳並修正庫存">
+{% if c['status'] != 'posted' %}
+<div class="btnrow">
+    <form class="inline" method="post" action="{{ url_for('count_fill', cid=c['id']) }}">
+        <button class="btn ghost" type="submit">無差異全部確認</button>
     </form>
+    <span class="note">把還沒盤的列一次填成系統帳。帳面本來就正確時最常用。</span>
+</div>
+{% endif %}
+
+<div class="pane">
+    <div class="pane-h">明細<span class="r">
+        <a href="{{ url_for('count_detail', cid=c['id'], sort=('loc' if sort != 'loc' else None), filter=filter) }}">{{ '依儲位排序' if sort != 'loc' else '依建檔順序' }}</a>
+        <a href="{{ url_for('count_detail', cid=c['id'], sort=sort, filter=('todo' if filter != 'todo' else None)) }}">{{ '只看未盤' if filter != 'todo' else '看全部' }}</a>
+        <a href="{{ url_for('count_detail', cid=c['id'], sort=sort, filter=('diff' if filter != 'diff' else None)) }}">{{ '只看有差異' if filter != 'diff' else '看全部' }}</a>
+        第 {{ page }} 頁</span></div>
+    <form method="post" action="{{ url_for('count_record', cid=c['id']) }}">
+        <input type="hidden" name="page" value="{{ page }}">
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="filter" value="{{ filter }}">
+        <div class="table-scroll">
+            <table class="cards">
+                <tr><th>料號</th><th>名稱</th><th>儲位</th><th class="num">系統帳</th>
+                    <th class="num">實盤數</th><th class="num">差異</th><th>備註</th>
+                    {% if c['status'] != 'posted' %}<th>單列</th>{% endif %}</tr>
+                {% for i in items %}
+                <tr id="i{{ i['id'] }}"{% if i['diff'] is not none and i['diff'] != 0 %} class="has-diff"{% endif %}>
+                    <td data-label="料號" class="mono">{{ i['sku'] }}</td>
+                    <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=i['product_id']) }}">{{ i['name'] }}</a></td>
+                    <td data-label="儲位" class="mono">{{ i['location'] or '—' }}</td>
+                    <td data-label="系統帳" class="num">{{ i['system_qty'] }}</td>
+                    <td data-label="實盤數" class="num">
+                        {% if c['status'] == 'posted' %}{{ i['counted_qty'] if i['counted_qty'] is not none else '—' }}
+                        {% else %}
+                        <label class="sr-only" for="q{{ i['id'] }}">第 {{ loop.index }} 列實盤數</label>
+                        <input id="q{{ i['id'] }}" class="count-input" type="number" name="qty_{{ i['id'] }}" min="0"
+                               inputmode="numeric" value="{{ i['counted_qty'] if i['counted_qty'] is not none else '' }}">
+                        {% endif %}
+                    </td>
+                    <td data-label="差異" class="num">
+                        {% if i['diff'] is none %}<span class="dim">—</span>
+                        {% elif i['diff'] == 0 %}<span class="chip ok">相符</span>
+                        {% else %}<span class="chip bad">{{ '+' if i['diff'] > 0 else '' }}{{ i['diff'] }}</span>{% endif %}
+                    </td>
+                    <td data-label="備註">
+                        {% if c['status'] == 'posted' %}{{ i['note'] }}
+                        {% else %}
+                        <label class="sr-only" for="n{{ i['id'] }}">第 {{ loop.index }} 列備註</label>
+                        <input id="n{{ i['id'] }}" class="count-note" type="text" name="note_{{ i['id'] }}"
+                               placeholder="差異原因" value="{{ i['note'] }}">
+                        {% endif %}
+                    </td>
+                    {% if c['status'] != 'posted' %}
+                    <td data-label="單列"><button class="small-btn ok-btn" type="submit"
+                        formaction="{{ url_for('count_record', cid=c['id'], only=i['id']) }}">存這列</button></td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+        {% if c['status'] != 'posted' %}
+        <div class="savebar">
+            <span class="cnt">這一頁已填 <b>{{ page_filled }}</b> / {{ items|length }} 列　·　整張單已盤 <b>{{ counted }}</b> / {{ total }} 列</span>
+            <button class="btn" type="submit">儲存這一頁</button>
+        </div>
+        {% endif %}
+    </form>
+</div>
+{{ pager }}
+
+{% if c['status'] != 'posted' %}
+<div class="pane">
+    <div class="pane-h">過帳</div>
+    <div class="pane-b">
+    {% if total - counted %}
+    <p class="note"><b>還有 {{ total - counted }} 列沒有盤點。</b>過帳只會調整已盤點的列,沒盤的列會被略過,而且過帳後整張單就鎖住不能再改。</p>
+    {% else %}
+    <p class="note">全部 {{ total }} 列都已盤點。過帳會依差異產生「盤點調整」異動並同步批次帳,之後這張單就鎖住不能再改。</p>
+    {% endif %}
+    {% if session.get('is_admin') %}
+    <form method="post" action="{{ url_for('count_post', cid=c['id']) }}"
+          onsubmit="return confirm('確定過帳?將依差異調整庫存,且不可復原。');">
+        <button class="btn" type="submit">過帳並調整庫存</button>
+    </form>
+    {% else %}
+    <p class="note">過帳需要管理員權限。</p>
+    {% endif %}
+    </div>
 </div>
 {% endif %}
 """
+
 
 PO_STATUS_LABEL = {"ordered": "已下訂", "shipped": "已出貨", "arrived": "已到貨待驗",
                    "closed": "已入庫結案", "cancelled": "已作廢"}
@@ -2724,12 +2797,22 @@ PAGE_RECEIPT_DETAIL = """
     <div class="stat-box"><div class="stat-num">{{ total_qty }}</div><div class="stat-cap">預計收料總量</div></div>
 </div>
 
+{% if r['status'] == 'open' %}
+<div class="btnrow">
+    <form class="inline" method="post" action="{{ url_for('receipt_fill', rid=r['id']) }}">
+        <button class="btn ghost" type="submit">全部照通知量核對</button>
+    </form>
+    <span class="note">照單全收是最常見的情況;按一次就把所有已對應列的實收數填成通知量。</span>
+</div>
+{% endif %}
+<form method="post" action="{{ url_for('receipt_check_all', rid=r['id']) }}">
 <div class="table-scroll">
     <table class="cards">
         <tr><th>行</th><th>檔案料號</th><th>對應商品</th><th class="num">通知量</th>
-            <th class="num">實收數</th><th>批號 / 效期</th><th>備註</th></tr>
+            <th class="num">實收數</th><th>備註</th><th>批號 / 效期</th>
+            {% if r['status'] == 'open' %}<th>單列</th>{% endif %}</tr>
         {% for i in items %}
-        <tr{% if i['product_id'] is none %} class="has-diff"{% endif %}>
+        <tr id="i{{ i['id'] }}"{% if i['product_id'] is none %} class="has-diff"{% endif %}>
             <td data-label="行">{{ i['line_no'] }}</td>
             <td data-label="檔案料號">
                 <span class="loc-cell">{{ i['raw_sku'] or '—' }}</span>
@@ -2750,27 +2833,45 @@ PAGE_RECEIPT_DETAIL = """
             <td data-label="實收數" class="num">
                 {% if r['status'] != 'open' %}{{ i['received_qty'] if i['received_qty'] is not none else '—' }}
                 {% else %}
-                <form class="inline count-form" method="post"
-                      action="{{ url_for('receipt_item_check', rid=r['id'], item_id=i['id']) }}">
-                    <input type="number" name="received_qty" min="0" inputmode="numeric" class="count-input"
-                           value="{{ i['received_qty'] if i['received_qty'] is not none else i['expected_qty'] }}">
-                    <input type="text" name="note" class="count-note" placeholder="備註" value="{{ i['note'] }}">
-                    <button class="small-btn ok-btn" type="submit">核對</button>
-                </form>
+                <label class="sr-only" for="q{{ i['id'] }}">第 {{ i['line_no'] }} 列實收數</label>
+                <input id="q{{ i['id'] }}" class="count-input" type="number" name="qty_{{ i['id'] }}" min="0"
+                       inputmode="numeric" value="{{ i['received_qty'] if i['received_qty'] is not none else '' }}">
+                {% endif %}
+            </td>
+            <td data-label="備註">
+                {% if r['status'] != 'open' %}{{ i['note'] }}
+                {% else %}
+                <label class="sr-only" for="n{{ i['id'] }}">第 {{ i['line_no'] }} 列備註</label>
+                <input id="n{{ i['id'] }}" class="count-note" type="text" name="note_{{ i['id'] }}"
+                       placeholder="備註" value="{{ i['note'] }}">
                 {% endif %}
             </td>
             <td data-label="批號 / 效期">
                 {{ i['lot_no'] or '(自動編號)' }}{% if i['expiry_date'] %}<br><span class="alias-cell">效期 {{ i['expiry_date'] }}</span>{% endif %}
             </td>
-            <td data-label="備註">{{ i['note'] }}</td>
+            {% if r['status'] == 'open' %}
+            <td data-label="單列"><button class="small-btn ok-btn" type="submit"
+                formaction="{{ url_for('receipt_check_all', rid=r['id'], only=i['id']) }}">存這列</button></td>
+            {% endif %}
         </tr>
         {% endfor %}
     </table>
 </div>
+{% if r['status'] == 'open' %}
+<div class="savebar">
+    <span class="cnt">已填 <b>{{ checked }}</b> / {{ total }} 列{% if unmatched %}　·　<b>{{ unmatched }}</b> 列還對不到料號{% endif %}</span>
+    <button class="btn" type="submit">儲存這一頁</button>
+</div>
+{% endif %}
+</form>
 
 {% if r['status'] == 'open' %}
 <div class="detail-section">
     <h2>放行入庫</h2>
+    {% if skipped %}
+    <p class="msg error" style="border-left-width:4px"><b>第 {{ skipped }} 列尚未核對或對不到料號,放行後會被略過,而且不能再修改。</b>
+    貨進了倉庫卻沒進帳,是庫存失準最常見的起點——請先把那幾列處理完再放行。</p>
+    {% endif %}
     <p class="note">
         放行會把每一列「已對應且實收 &gt; 0」的品項寫成正式入庫異動並建立批次,庫存這時才會增加。
         實收填 0 或未核對的列會被略過。<strong>尚有未對應料號且實收 &gt; 0 時無法放行</strong>——
@@ -4412,6 +4513,15 @@ def count_new():
         products = db.execute(
             "SELECT id, quantity FROM products WHERE category = ? ORDER BY id", (category,)).fetchall()
         scope_label = f"分類:{category}"
+    elif scope == "location":
+        # 人是站在一排貨架前盤點的:依儲位前綴建單,清單才跟走位一致
+        loc = request.form.get("location", "").strip()
+        if not loc:
+            return counts_page(error="範圍選「指定儲位」時必須填儲位前綴(例:CE、D-15)")
+        products = db.execute(
+            "SELECT id, quantity FROM products WHERE location LIKE ? ORDER BY location, sku",
+            (f"{loc}%",)).fetchall()
+        scope_label = f"儲位:{loc}"
     elif scope in ("A", "B", "C"):
         abc = abc_class_map()
         products = [p for p in db.execute("SELECT id, quantity FROM products ORDER BY id").fetchall()
@@ -4439,6 +4549,9 @@ def count_new():
     return redirect(url_for("count_detail", cid=cid))
 
 
+COUNT_PER_PAGE = 50
+
+
 def render_count_detail(cid, error=None, msg=None):
     db = get_db()
     c = db.execute("SELECT * FROM stock_counts WHERE id = ?", (cid,)).fetchone()
@@ -4448,19 +4561,49 @@ def render_count_detail(cid, error=None, msg=None):
     cd["created_local"] = fmt_local(c["created_at"])
     cd["posted_local"] = fmt_local(c["posted_at"]) if c["posted_at"] else ""
     cd["accuracy_str"] = fmt_num(c["accuracy"]) if c["accuracy"] is not None else "—"
+    sort = request.args.get("sort", "")
+    filt = request.args.get("filter", "")
+    page = max(1, safe_int(request.args.get("page", "1"), 1) or 1)
+
+    def rows(limit=None, offset=0):
+        # 人是站在一排貨架前盤點的,依儲位排序時清單順序才跟走位一致
+        order = "p.location, p.sku" if sort == "loc" else "p.id"
+        where = ""
+        if filt == "todo":
+            where = " AND i.counted_qty IS NULL"
+        elif filt == "diff":
+            where = " AND i.counted_qty IS NOT NULL AND i.counted_qty <> i.system_qty"
+        sql = f"""SELECT i.*, p.sku, p.name, p.location FROM stock_count_items i
+                  JOIN products p ON i.product_id = p.id
+                  WHERE i.count_id = ?{where} ORDER BY {order}"""
+        params = [cid]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params += [limit + 1, offset]
+        return db.execute(sql, params).fetchall()
+
+    fetched = rows(COUNT_PER_PAGE, (page - 1) * COUNT_PER_PAGE)
+    has_next = len(fetched) > COUNT_PER_PAGE
     items = []
-    for r in db.execute("""
-            SELECT i.*, p.sku, p.name, p.location FROM stock_count_items i
-            JOIN products p ON i.product_id = p.id
-            WHERE i.count_id = ? ORDER BY p.id
-        """, (cid,)).fetchall():
+    for r in fetched[:COUNT_PER_PAGE]:
         d = dict(r)
         d["diff"] = (r["counted_qty"] - r["system_qty"]) if r["counted_qty"] is not None else None
         items.append(d)
-    counted = sum(1 for i in items if i["counted_qty"] is not None)
-    diff_count = sum(1 for i in items if i["diff"] not in (None, 0))
-    return render_page(PAGE_COUNT_DETAIL, c=cd, items=items, total=len(items),
-                       counted=counted, diff_count=diff_count, error=error, msg=msg, page_title="盤點單", back_url=url_for('counts_page'), back_label="回盤點單清單")
+    tot = db.execute("SELECT COUNT(*) AS c FROM stock_count_items WHERE count_id = ?", (cid,)).fetchone()["c"]
+    counted = db.execute("SELECT COUNT(*) AS c FROM stock_count_items WHERE count_id = ? AND counted_qty IS NOT NULL",
+                         (cid,)).fetchone()["c"]
+    diff_count = db.execute("""SELECT COUNT(*) AS c FROM stock_count_items
+                               WHERE count_id = ? AND counted_qty IS NOT NULL AND counted_qty <> system_qty""",
+                            (cid,)).fetchone()["c"]
+    return render_page(PAGE_COUNT_DETAIL, c=cd, items=items, total=tot,
+                       counted=counted, diff_count=diff_count,
+                       page_filled=sum(1 for i in items if i["counted_qty"] is not None),
+                       page=page, sort=sort, filter=filt,
+                       pager=build_pager("count_detail", page, has_next, cid=cid,
+                                         **({"sort": sort} if sort else {}),
+                                         **({"filter": filt} if filt else {})),
+                       error=error, msg=msg, page_title="盤點單",
+                       back_url=url_for('counts_page'), back_label="回盤點單清單")
 
 
 @app.route("/counts/<int:cid>")
@@ -4469,31 +4612,86 @@ def count_detail(cid):
     return render_count_detail(cid)
 
 
+def count_back(cid, anchor=None):
+    """儲存後回到原頁原頁碼,並定位到剛存的那一列——
+    舊版一列一送出後跳回最頂端,現場在第 40 列存完要自己捲回去確認。"""
+    url = url_for("count_detail", cid=cid,
+                  page=request.form.get("page") or None,
+                  sort=request.form.get("sort") or None,
+                  filter=request.form.get("filter") or None)
+    return redirect(url + (f"#i{anchor}" if anchor else ""))
+
+
 @app.route("/counts/<int:cid>/count", methods=["POST"])
 @login_required
 def count_record(cid):
-    # 現場人員(一般使用者)即可記錄實盤數;只有過帳需要管理員
+    """一次儲存整張表(每列 qty_<item_id> / note_<item_id>)。
+    舊版每列各自是一張表單,打完十列按第一列的儲存,其餘九列靜默消失。
+    only 參數保留單列儲存當安全網。"""
     db = get_db()
     c = db.execute("SELECT status FROM stock_counts WHERE id = ?", (cid,)).fetchone()
     if c is None:
         return counts_page(error="找不到指定的盤點單")
     if c["status"] == "posted":
         return render_count_detail(cid, error="此盤點單已過帳,不可再修改")
-    pid = safe_int(request.form.get("product_id", ""))
-    qty = safe_int(request.form.get("counted_qty", ""))
-    note = request.form.get("note", "").strip()
-    if pid is None:
-        return render_count_detail(cid, error="請指定商品")
-    if qty is None or qty < 0:
-        return render_count_detail(cid, error="實盤數必須為 0 或正整數")
-    if qty > MAX_QUANTITY:
-        return render_count_detail(cid, error="實盤數過大,請確認輸入")
-    db.execute("""
-        UPDATE stock_count_items SET counted_qty = ?, note = ?, counted_at = ?
-        WHERE count_id = ? AND product_id = ?
-    """, (qty, note, now_str(), cid, pid))
+    ts = now_str()
+    # 相容層:舊契約是 product_id + counted_qty 單列送出。批次端點本來就吃得下單列,
+    # 保留它讓舊書籤、舊腳本與既有驗收條目不會斷。
+    legacy_pid = safe_int(request.form.get("product_id", ""))
+    if legacy_pid is not None:
+        qty = safe_int(request.form.get("counted_qty", ""))
+        if qty is None or qty < 0:
+            return render_count_detail(cid, error="實盤數必須為 0 或正整數")
+        if qty > MAX_QUANTITY:
+            return render_count_detail(cid, error="實盤數過大,請確認輸入")
+        db.execute("""UPDATE stock_count_items SET counted_qty = ?, note = ?, counted_at = ?
+                      WHERE count_id = ? AND product_id = ?""",
+                   (qty, request.form.get("note", "").strip(), ts, cid, legacy_pid))
+        db.commit()
+        return redirect(url_for("count_detail", cid=cid))
+    only = safe_int(request.args.get("only", ""))
+    saved, bad = 0, []
+    for key, raw in request.form.items():
+        if not key.startswith("qty_"):
+            continue
+        item_id = safe_int(key[4:])
+        if item_id is None or (only is not None and item_id != only):
+            continue
+        raw = raw.strip()
+        note = request.form.get(f"note_{item_id}", "").strip()
+        if raw == "":
+            # 留白代表「這一列還沒盤」,不是盤到 0。表單一定會把既有值帶回來,
+            # 所以送出空值是使用者刻意清掉,應還原成未盤狀態。
+            db.execute("""UPDATE stock_count_items SET counted_qty = NULL, counted_at = NULL, note = ?
+                          WHERE id = ? AND count_id = ?""", (note, item_id, cid))
+            continue
+        qty = safe_int(raw)
+        if qty is None or qty < 0 or qty > MAX_QUANTITY:
+            bad.append(item_id)
+            continue
+        db.execute("""UPDATE stock_count_items SET counted_qty = ?, note = ?, counted_at = ?
+                      WHERE id = ? AND count_id = ?""", (qty, note, ts, item_id, cid))
+        saved += 1
     db.commit()
-    return redirect(url_for("count_detail", cid=cid))
+    if bad:
+        return render_count_detail(cid, error=f"有 {len(bad)} 列的實盤數不是 0 或正整數,那幾列沒有存進去")
+    return count_back(cid, only or (request.form.get("page") and None))
+
+
+@app.route("/counts/<int:cid>/fill", methods=["POST"])
+@login_required
+def count_fill(cid):
+    """無差異全部確認:把還沒盤的列一次填成系統帳。帳面本來就正確時最常用。"""
+    db = get_db()
+    c = db.execute("SELECT status FROM stock_counts WHERE id = ?", (cid,)).fetchone()
+    if c is None:
+        return counts_page(error="找不到指定的盤點單")
+    if c["status"] == "posted":
+        return render_count_detail(cid, error="此盤點單已過帳,不可再修改")
+    n = db.execute("""UPDATE stock_count_items SET counted_qty = system_qty, counted_at = ?
+                      WHERE count_id = ? AND counted_qty IS NULL""", (now_str(), cid)).rowcount
+    db.commit()
+    return render_count_detail(cid, msg=f"已把 {n} 列未盤的品項填成系統帳(視為無差異)")
 
 
 @app.route("/counts/<int:cid>/post", methods=["POST"])
@@ -5077,9 +5275,11 @@ def render_receipt_detail(rid, error=None, msg=None):
     checked = sum(1 for i in items if i["received_qty"] is not None)
     unmatched = sum(1 for i in items if i["product_id"] is None)
     total_qty = sum(i["expected_qty"] for i in items)
+    skipped = "、".join(str(i["line_no"]) for i in items
+                        if i["product_id"] is None or not (i["received_qty"] or 0))
     return render_page(PAGE_RECEIPT_DETAIL, r=rd, items=items, total=len(items),
                        checked=checked, unmatched=unmatched, total_qty=total_qty,
-                       error=error, msg=msg, page_title="收貨單明細", back_url=url_for('receipts_page'), back_label="回收貨單清單")
+                       skipped=skipped, error=error, msg=msg, page_title="收貨單明細", back_url=url_for('receipts_page'), back_label="回收貨單清單")
 
 
 @app.route("/receipts/<int:rid>")
@@ -5154,6 +5354,75 @@ def receipt_item_check(rid, item_id):
         return render_receipt_detail(rid, error="找不到指定的明細列")
     db.commit()
     return redirect(url_for("receipt_detail", rid=rid))
+
+
+
+@app.route("/receipts/<int:rid>/check", methods=["POST"])
+@login_required
+def receipt_check_all(rid):
+    """一次儲存整張收貨明細(每列 qty_<item_id> / note_<item_id>)。
+    舊版每列各自是一張表單,現場照著送貨單一路打十幾列再回頭存,
+    只有按下去的那一列會被存起來,其餘輸入靜默消失。
+    only 參數保留單列儲存當安全網。"""
+    r, err = open_receipt_or_error(rid)
+    if err:
+        return receipts_page(error=err) if r is None and "找不到" in err else render_receipt_detail(rid, error=err)
+    db = get_db()
+    ts = now_str()
+    # 相容層:舊契約是 product_id + counted_qty 單列送出。批次端點本來就吃得下單列,
+    # 保留它讓舊書籤、舊腳本與既有驗收條目不會斷。
+    legacy_pid = safe_int(request.form.get("product_id", ""))
+    if legacy_pid is not None:
+        qty = safe_int(request.form.get("counted_qty", ""))
+        if qty is None or qty < 0:
+            return render_count_detail(cid, error="實盤數必須為 0 或正整數")
+        if qty > MAX_QUANTITY:
+            return render_count_detail(cid, error="實盤數過大,請確認輸入")
+        db.execute("""UPDATE stock_count_items SET counted_qty = ?, note = ?, counted_at = ?
+                      WHERE count_id = ? AND product_id = ?""",
+                   (qty, request.form.get("note", "").strip(), ts, cid, legacy_pid))
+        db.commit()
+        return redirect(url_for("count_detail", cid=cid))
+    only = safe_int(request.args.get("only", ""))
+    saved, bad = 0, []
+    for key, raw in request.form.items():
+        if not key.startswith("qty_"):
+            continue
+        item_id = safe_int(key[4:])
+        if item_id is None or (only is not None and item_id != only):
+            continue
+        note = request.form.get(f"note_{item_id}", "").strip()
+        raw = raw.strip()
+        if raw == "":
+            # 留白代表「這一列還沒核對」,不是收到 0。同上,送出空值是刻意清掉。
+            db.execute("""UPDATE receipt_items SET received_qty = NULL, checked_at = NULL, note = ?
+                          WHERE id = ? AND receipt_id = ?""", (note, item_id, rid))
+            continue
+        qty = safe_int(raw)
+        if qty is None or qty < 0 or qty > MAX_QUANTITY:
+            bad.append(item_id)
+            continue
+        db.execute("""UPDATE receipt_items SET received_qty = ?, note = ?, checked_at = ?
+                      WHERE id = ? AND receipt_id = ?""", (qty, note, ts, item_id, rid))
+        saved += 1
+    db.commit()
+    if bad:
+        return render_receipt_detail(rid, error=f"有 {len(bad)} 列的實收數不是 0 或正整數,那幾列沒有存進去")
+    return redirect(url_for("receipt_detail", rid=rid) + (f"#i{only}" if only else ""))
+
+
+@app.route("/receipts/<int:rid>/fill", methods=["POST"])
+@login_required
+def receipt_fill(rid):
+    """全部照通知量核對:照單全收是最常見的情況,不該逐列重打一次。"""
+    r, err = open_receipt_or_error(rid)
+    if err:
+        return receipts_page(error=err) if r is None and "找不到" in err else render_receipt_detail(rid, error=err)
+    db = get_db()
+    n = db.execute("""UPDATE receipt_items SET received_qty = expected_qty, checked_at = ?
+                      WHERE receipt_id = ? AND product_id IS NOT NULL""", (now_str(), rid)).rowcount
+    db.commit()
+    return render_receipt_detail(rid, msg=f"已把 {n} 列已對應的品項填成通知量,請確認數量無誤後放行")
 
 
 @app.route("/receipts/<int:rid>/post", methods=["POST"])
