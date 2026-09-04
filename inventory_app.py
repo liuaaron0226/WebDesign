@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.09.03"
+APP_VERSION = "2026.09.04"
 
 app = Flask(__name__)
 
@@ -374,6 +374,12 @@ def init_db():
     ensure_column(conn, "products", "issue_strategy", "TEXT DEFAULT 'FIFO'")
     ensure_column(conn, "lots", "expiry_date", "TEXT DEFAULT ''")
     ensure_column(conn, "transactions", "purpose", "TEXT DEFAULT ''")
+    # 待辦帶的四個彙總各自吃得到索引;不做快取,因為快取會讓使用者放行完
+    # 回頭看到數字沒變、以為沒存到而再按一次——把不存在的效能問題換成真的正確性問題
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_poi_open ON purchase_order_items(po_id, ordered_qty, received_qty)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_threshold ON products(low_stock_threshold)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
     conn.commit()
     conn.close()
     os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -908,6 +914,47 @@ LAYOUT = """
         nav .menu-panel a:hover { background: var(--wash); }
         nav .menu-panel a.active { background: var(--amber-soft); color: var(--amber-text); font-weight: 700; }
 
+
+        /* ── 待辦帶:招牌元素,全站常駐。四格全部是可以「數」的件數 ── */
+        .rail { background: var(--hull); display: grid; grid-template-columns: repeat(4, 1fr);
+                border-bottom: 1px solid var(--hull-3); }
+        .rail a { display: block; padding: 10px var(--s4) 11px; text-decoration: none;
+                  color: var(--on-hull); border-left: 1px solid var(--hull-3);
+                  position: relative; transition: background .15s var(--ease); }
+        .rail a:first-child { border-left: none; }
+        .rail a::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+                          width: 4px; background: var(--hull-3); }
+        .rail a:hover { background: var(--hull-2); }
+        .rail .k { display: block; font-size: var(--t2); color: var(--on-hull-2); line-height: 1.4; }
+        .rail .v { display: block; margin-top: 2px; font-size: 28px; font-weight: 700;
+                   line-height: 1.15; font-family: var(--font-code);
+                   font-variant-numeric: tabular-nums; }
+        .rail .v .unit { color: var(--on-hull-2); }
+        .rail .s { display: block; font-size: var(--t1); color: var(--on-hull-2); }
+        /* 語意色:琥珀=等你動手、靛藍=純資訊、紅=壞消息、灰=沒事 */
+        .rail .act::before { background: var(--amber); }
+        .rail .act .v { color: var(--amber); }
+        .rail .info::before { background: var(--transit); }
+        .rail .info .v { color: #89aeec; }
+        .rail .bad::before { background: var(--fault); }
+        .rail .bad .v { color: #f2909a; }
+        .rail .none::before { background: var(--hull-3); }
+        .rail .none .v { color: var(--on-hull-2); font-size: var(--t4);
+                         font-weight: 400; font-family: var(--font-ui); }
+        /* ── 庫齡長條:純 CSS,不引入任何圖表函式庫 ── */
+        .bars { display: flex; flex-direction: column; gap: var(--s2); }
+        .bar { display: grid; grid-template-columns: 92px 1fr 76px; align-items: center;
+               gap: var(--s3); font-size: var(--t2); }
+        .bar .track { display: block; height: 22px; background: var(--wash);
+                      border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+        .bar .fill { display: block; height: 100%; border-radius: 2px; min-width: 3px; }
+        /* ── 空狀態:一定要有出路,不能只寫「沒有資料」 ── */
+        .empty { text-align: center; padding: var(--s6) var(--s4); }
+        .empty .h { font-size: var(--t4); font-weight: 700; margin-bottom: var(--s1); }
+        .empty .p { font-size: var(--t2); color: var(--mute); max-width: 460px;
+                    margin: 0 auto var(--s4); line-height: 1.8; }
+        td.chips { white-space: nowrap; }
+        td.chips .chip { margin-right: var(--s1); }
         /* ── 版面 ── */
         .container { max-width: 1240px; margin: var(--s5) auto; padding: 0 var(--s4); }
         /* 純表單頁收窄,避免 420px 的輸入框漂在 1200px 的版面裡 */
@@ -1262,6 +1309,13 @@ LAYOUT = """
             .count-form { width: 100%; }
             .count-input, .count-note { width: 100% !important; max-width: none !important; flex: 1 1 100%; }
             .count-form .small-btn { width: 100%; margin-top: var(--s1); }
+            .rail { grid-template-columns: 1fr 1fr; }
+            .rail a { padding: 8px var(--s3) 9px; border-top: 1px solid var(--hull-3); }
+            .rail a:nth-child(-n+2) { border-top: none; }
+            .rail a:nth-child(odd) { border-left: none; }
+            .rail .v { font-size: 23px; }
+            .rail .s { font-size: 11px; line-height: 1.4; }
+            .bar { grid-template-columns: 68px 1fr 62px; gap: var(--s2); font-size: var(--t1); }
             .pickrow { flex-wrap: wrap; min-height: 60px; }
             .pickrow .sku { min-width: 0; flex-basis: 100%; }
             .pickcard .right { margin-left: 0; text-align: left; }
@@ -1322,6 +1376,15 @@ LAYOUT = """
             </div>
         </details>
     </nav>
+    <div class="rail">
+        {% for c in rail %}
+        <a class="{{ c['tone'] }}" href="{{ c['href'] }}">
+            <span class="k">{{ c['label'] }}</span>
+            <span class="v">{{ c['value'] }}{% if c['unit'] %}<span class="unit">{{ c['unit'] }}</span>{% endif %}</span>
+            <span class="s">{{ c['sub'] }}</span>
+        </a>
+        {% endfor %}
+    </div>
     {% endif %}
     <div class="container{% if narrow %} narrow{% endif %}">
         {% if back_url %}<p class="crumb"><a href="{{ back_url }}">← {{ back_label }}</a></p>{% endif %}
@@ -1333,6 +1396,65 @@ LAYOUT = """
 </body>
 </html>
 """
+
+
+
+def todo_rail():
+    """待辦帶:全站常駐的四格。規則有三條——
+    (1) 四格全部是可以「數」的件數,沒有一格需要把個、米、捲、箱加起來;
+    (2) 即時計算不快取;
+    (3) 沒有資料時說實話並給出路,不顯示一個會被當成「一切正常」的 0。"""
+    db = get_db()
+    one = lambda sql: db.execute(sql).fetchone()
+
+    pending = one("SELECT COUNT(*) AS c FROM receipts WHERE status = 'open'")["c"]
+    po = one("""
+        SELECT COUNT(DISTINCT o.id) AS orders,
+               COALESCE(SUM(i.ordered_qty - i.received_qty), 0) AS qty
+        FROM purchase_orders o JOIN purchase_order_items i ON i.po_id = o.id
+        WHERE o.status IN ('ordered', 'shipped', 'arrived')
+          AND i.ordered_qty > i.received_qty""")
+    has_threshold = one("SELECT COUNT(*) AS c FROM products WHERE low_stock_threshold > 0")["c"]
+    short = one("""
+        SELECT COUNT(*) AS c FROM products p
+        WHERE p.low_stock_threshold > 0
+          AND p.quantity - COALESCE((SELECT SUM(r.quantity) FROM reservations r
+                WHERE r.product_id = p.id AND r.status = 'active'), 0) <= p.low_stock_threshold""")["c"]
+    noloc = one("SELECT COUNT(*) AS c FROM products WHERE location IS NULL OR location = ''")["c"]
+    tmpsku = one("SELECT COUNT(*) AS c FROM products WHERE sku LIKE 'TMP-%'")["c"]
+    # 一項料可能同時無儲位又掛臨時料號,不能把兩個數字相加(會重複計算)
+    pend_data = one("""SELECT COUNT(*) AS c FROM products
+        WHERE location IS NULL OR location = '' OR sku LIKE 'TMP-%'""")["c"]
+    total = one("SELECT COUNT(*) AS c FROM products")["c"]
+
+    cells = [
+        {"tone": "act" if pending else "none", "label": "待驗收貨",
+         "value": str(pending), "unit": "張" if pending else "",
+         "sub": "收貨單已上傳,等人核對" if pending else "沒有等著核對的收貨單",
+         "href": url_for("receipts_page")},
+        {"tone": "info" if po["orders"] else "none", "label": "在途採購",
+         "value": str(po["orders"]), "unit": "張" if po["orders"] else "",
+         "sub": f"{po['qty']:,} 件在路上" if po["orders"] else "沒有未到貨的採購單",
+         "href": url_for("orders_page")},
+    ]
+    if has_threshold == 0 and total:
+        # 全部商品都沒有補貨門檻時,「短缺 0」是騙人的——那不是「沒有短缺」,是「不知道」
+        cells.append({"tone": "none", "label": "短缺", "value": "尚未設定", "unit": "",
+                      "sub": f"{total:,} 項都還沒有補貨門檻",
+                      "href": url_for("planning_page")})
+    else:
+        cells.append({"tone": "bad" if short else "none", "label": "短缺",
+                      "value": str(short), "unit": "項" if short else "",
+                      "sub": "低於補貨門檻,要補貨" if short else f"{has_threshold:,} 項有設門檻,目前都夠",
+                      "href": url_for("alerts")})
+    parts = []
+    if tmpsku: parts.append(f"{tmpsku:,} 無正式料號")
+    if noloc: parts.append(f"{noloc:,} 無儲位")
+    cells.append({"tone": "bad" if pend_data else "none", "label": "資料待補",
+                  "value": f"{pend_data:,}", "unit": "項" if pend_data else "",
+                  "sub": " · ".join(parts) if parts else "料號與儲位都齊全",
+                  "href": url_for("index", missing=1)})
+    return cells
 
 
 def build_pager(endpoint, page, has_next, **params):
@@ -1357,6 +1479,8 @@ def render_page(body, **ctx):
     ctx.setdefault("narrow", False)       # 純表單頁收窄容器
     ctx.setdefault("back_url", None)      # 明細頁的具名返回連結
     ctx.setdefault("back_label", "返回")
+    if "rail" not in ctx:
+        ctx["rail"] = todo_rail() if session.get("user_id") else []
     ctx.setdefault("year", datetime.now().year)
     ctx.setdefault("app_version", APP_VERSION)
     return render_template_string(LAYOUT.replace("__BODY__", body), **ctx)
@@ -1395,13 +1519,11 @@ PAGE_LOGIN = """
 
 PAGE_INDEX = """
 <h1>庫存總覽</h1>
-{% if low_count > 0 %}
-<div class="banner">⚠ 目前有 {{ low_count }} 項商品低於庫存門檻,<a class="plain" href="{{ url_for('alerts') }}">查看低庫存警示</a></div>
-{% endif %}
 <form method="get" class="hero-search">
     <span class="search-field">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
-        <input type="text" name="q" placeholder="輸入料號、品名、儲位或任一公司的別名料號" value="{{ q }}">
+        <label class="sr-only" for="hq">搜尋料號、品名、儲位或任一公司的別名料號</label>
+        <input id="hq" type="text" name="q" placeholder="輸入料號、品名、儲位或任一公司的別名料號" value="{{ q }}">
     </span>
     <select name="category">
         <option value="">全部分類</option>
@@ -1409,115 +1531,157 @@ PAGE_INDEX = """
         <option value="{{ c }}" {% if c == category %}selected{% endif %}>{{ c }}</option>
         {% endfor %}
     </select>
+    {% if cols_full %}<input type="hidden" name="cols" value="full">{% endif %}
+    {% if missing %}<input type="hidden" name="missing" value="1">{% endif %}
     <input type="submit" value="搜尋">
 </form>
 <p class="sub-links">
     <a class="plain" href="{{ url_for('index') }}">清除搜尋</a> ・
+    {% if cols_full %}
+    <a class="plain" href="{{ url_for('index', q=q, category=category, missing=(1 if missing else None)) }}">只看常用 7 欄</a>
+    {% else %}
+    <a class="plain" href="{{ url_for('index', q=q, category=category, cols='full', missing=(1 if missing else None)) }}">顯示全部欄位</a>
+    {% endif %} ・
+    {% if missing %}
+    <a class="plain" href="{{ url_for('index', q=q, category=category) }}">看全部商品</a>
+    {% else %}
+    <a class="plain" href="{{ url_for('index', missing=1) }}">只看資料待補的</a>
+    {% endif %} ・
     <a class="plain" href="{{ url_for('export_inventory') }}">匯出庫存 CSV</a>
 </p>
-{% if po_summary_total %}
-<div class="po-home">
-    <h2>採購在途</h2>
-    <div class="po-flow">
-        {% for st in ['ordered','shipped','arrived'] %}
-        <a class="po-step po-{{ st }}" href="{{ url_for('orders_page', status=st) }}">
-            <span class="po-step-label">{{ po_labels[st] }}</span>
-            <span class="po-step-n">{{ po_summary[st]['orders'] }}<small> 張單</small></span>
-            <span class="po-step-sub">{{ po_summary[st]['items'] }} 品項・在途 {{ po_summary[st]['qty'] }}</span>
-        </a>
-        {% endfor %}
-    </div>
-</div>
-{% endif %}
-{% if products %}
-<div class="table-scroll">
-<table class="cards">
-    <tr><th>SKU</th><th>名稱</th><th>儲位</th><th>別名料號</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th class="num">在途</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>供應商</th><th>操作</th></tr>
-    {% for p in products %}
-    <tr{% if p['low_stock_threshold'] > 0 and p['available'] <= p['low_stock_threshold'] %} class="low-stock"{% endif %}>
-        <td data-label="SKU">{{ p['sku'] }}</td>
-        <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a>{% if p['low_stock_threshold'] > 0 and p['available'] <= p['low_stock_threshold'] %} <span class="badge-low">⚠ 低庫存</span>{% endif %}</td>
-        <td data-label="儲位" class="loc-cell">{{ p['location'] or '—' }}</td>
-        <td data-label="別名料號" class="alias-cell">{{ p['alias_text'] or '—' }}</td>
-        <td data-label="分類">{{ p['category'] }}</td>
-        <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-        <td data-label="可用" class="num" id="avail-{{ p['id'] }}">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
-        <td data-label="在途" class="num">{% if p['onorder'] %}<span class="onorder-cell">{{ p['onorder'] }}</span>{% else %}—{% endif %}</td>
-        <td data-label="單位">{{ p['unit'] }}</td>
-        <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
-        <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
-        <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
-        <td data-label="操作">
-            <a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">詳細</a>
-            <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯</a>
-            {% if session.get('is_admin') %}
-            <form class="inline" method="post" action="{{ url_for('product_delete', pid=p['id']) }}"
-                  onsubmit="return confirm('確定刪除商品「{{ p['name'] }}」?');">
-                <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
-            </form>
-            {% endif %}
-        </td>
-    </tr>
-    {% endfor %}
-</table>
-</div>
-{{ pager }}
-{% elif q or category %}
-<p>查無商品:找不到符合條件的資料。可以試試改用其他公司的別名料號搜尋,或確認關鍵字是否正確。</p>
-{% else %}
-<p>目前沒有任何商品。<a class="plain" href="{{ url_for('product_new') }}">新增第一筆商品</a>,或用 <a class="plain" href="{{ url_for('csv_import') }}">CSV 匯入</a>整批建檔。</p>
-{% endif %}
-"""
-
-PAGE_ALERTS = """
-<h1>低庫存警示</h1>
-{% if products %}
-<p>下列商品庫存已達到或低於門檻,請儘快補貨:</p>
-<div class="table-scroll">
-    <table class="cards">
-        <tr><th>SKU</th><th>名稱</th><th>儲位</th><th class="num">現貨</th><th class="num">可用</th><th class="num">低庫存門檻</th><th>單位</th><th>供應商</th></tr>
-        {% for p in products %}
-        <tr class="low-stock">
-            <td data-label="SKU">{{ p['sku'] }}</td>
-            <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
-            <td data-label="儲位">{{ p['location'] or '—' }}</td>
-            <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
-            <td data-label="可用" class="num">{{ p['available'] }}{% if p['reserved'] %} <span class="resv-note">(預留 {{ p['reserved'] }})</span>{% endif %}</td>
-            <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
-            <td data-label="單位">{{ p['unit'] }}</td>
-            <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-</div>
-{% else %}
-<p>目前沒有低庫存商品。</p>
-{% endif %}
-
-<div class="detail-section">
-    <h2>效期警示</h2>
-    {% if expiring %}
-    <p class="note">下列批次已過期或將在 30 天內到期,請優先使用或處理:</p>
+{% if rows %}
+<div class="pane">
+    <div class="pane-h">{% if missing %}資料待補的商品{% elif q or category %}符合條件的商品{% else %}庫存清單{% endif %}<span class="r">第 {{ page }} 頁</span></div>
     <div class="table-scroll">
         <table class="cards">
-            <tr><th>批號</th><th>商品</th><th>SKU</th><th class="num">剩餘</th><th>有效期</th><th class="num">剩餘天數</th></tr>
-            {% for l in expiring %}
-            <tr{% if l['expired'] %} class="low-stock"{% endif %}>
-                <td data-label="批號">{{ l['lot_no'] }}</td>
-                <td data-label="商品"><a class="plain" href="{{ url_for('product_detail', pid=l['product_id']) }}">{{ l['name'] }}</a></td>
-                <td data-label="SKU">{{ l['sku'] }}</td>
-                <td data-label="剩餘" class="num">{{ l['qty_remaining'] }} {{ l['unit'] }}</td>
-                <td data-label="有效期">{{ l['expiry_date'] }}</td>
-                <td data-label="剩餘天數" class="num">{% if l['expired'] %}<strong style="color:#b91c1c">已過期</strong>{% else %}{{ l['days_left'] }} 天{% endif %}</td>
+            <tr>
+                <th>料號</th><th>名稱</th><th>儲位</th><th class="num">現貨</th><th class="num">可用</th>
+                {% if cols_full %}<th class="num">在途</th><th>別名料號</th><th>分類</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>供應商</th>{% endif %}
+                <th>狀態</th><th>操作</th>
+            </tr>
+            {% for p in rows %}
+            <tr{% if p['low'] %} class="low-stock"{% endif %}>
+                <td data-label="料號" class="mono">{{ p['sku'] }}</td>
+                <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
+                <td data-label="儲位" class="mono">{{ p['location'] or '—' }}</td>
+                <td data-label="現貨" class="num" id="qty-{{ p['id'] }}">{{ p['quantity'] }}</td>
+                <td data-label="可用" class="num" id="avail-{{ p['id'] }}">{{ p['available'] }}</td>
+                {% if cols_full %}
+                <td data-label="在途" class="num">{% if p['onorder'] %}<span class="onorder-cell">{{ p['onorder'] }}</span>{% else %}—{% endif %}</td>
+                <td data-label="別名料號" class="alias-cell">{{ p['alias_text'] or '—' }}</td>
+                <td data-label="分類">{{ p['category'] }}</td>
+                <td data-label="單位">{{ p['unit'] }}</td>
+                <td data-label="單價" class="num">{{ p['unit_price_str'] }}</td>
+                <td data-label="低庫存門檻" class="num">{{ p['low_stock_threshold'] }}</td>
+                <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
+                {% endif %}
+                <td data-label="狀態" class="chips">
+                    {% if p['onorder'] %}<span class="chip info">在途 {{ p['onorder'] }}</span>{% endif %}
+                    {% if p['low'] %}<span class="chip bad">短缺</span>{% endif %}
+                    {% if p['reserved'] %}<span class="chip held">已預留 {{ p['reserved'] }}</span>{% endif %}
+                    {% if not p['location'] %}<span class="chip off">無儲位</span>{% endif %}
+                </td>
+                <td data-label="操作">
+                    <a class="btn sm ghost" href="{{ url_for('stock_in', product_id=p['id']) }}">入庫</a>
+                    <a class="btn sm ghost" href="{{ url_for('stock_out', product_id=p['id']) }}">出庫</a>
+                    <a class="plain" href="{{ url_for('product_edit', pid=p['id']) }}">編輯</a>
+                    {% if session.get('is_admin') %}
+                    <form class="inline" method="post" action="{{ url_for('product_delete', pid=p['id']) }}"
+                          onsubmit="return confirm('確定刪除「{{ p['name'] }}」?此操作無法復原。');">
+                        <button class="small-btn icon-btn" type="submit" title="刪除商品" aria-label="刪除商品"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12"/><path d="M10.5 11v6M13.5 11v6"/></svg></button>
+                    </form>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </table>
     </div>
-    {% else %}
-    <p>沒有即將到期的批次(僅統計有設定有效期的批次)。</p>
-    {% endif %}
 </div>
+{{ pager }}
+{% else %}
+<div class="pane"><div class="pane-b"><div class="empty">
+    <div class="h">{% if missing %}沒有資料待補的商品{% else %}查無商品{% endif %}</div>
+    <div class="p">{% if missing %}所有商品的料號與儲位都齊全。{% else %}換個關鍵字試試,或用對方公司的料號、儲位再找一次。{% endif %}</div>
+    <div class="btnrow" style="justify-content:center">
+        <a class="btn ghost" href="{{ url_for('index') }}">看全部商品</a>
+        <a class="btn ghost" href="{{ url_for('product_new') }}">新增商品</a>
+    </div>
+</div></div></div>
+{% endif %}
 """
+
+
+PAGE_ALERTS = """
+<h1>短缺與效期</h1>
+{% if products %}
+<div class="pane">
+    <div class="pane-h">要補貨的料<span class="r">{{ products|length }} 項 · 依可用量由少到多</span></div>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>料號</th><th>名稱</th><th>儲位</th><th class="num">現貨</th><th class="num">可用</th>
+                <th class="num">門檻</th><th class="num">建議補量</th><th>狀態</th><th>供應商</th><th>操作</th></tr>
+            {% for p in products %}
+            <tr class="low-stock">
+                <td data-label="料號" class="mono">{{ p['sku'] }}</td>
+                <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=p['id']) }}">{{ p['name'] }}</a></td>
+                <td data-label="儲位" class="mono">{{ p['location'] or '—' }}</td>
+                <td data-label="現貨" class="num">{{ p['quantity'] }}</td>
+                <td data-label="可用" class="num">{{ p['available'] }}</td>
+                <td data-label="門檻" class="num">{{ p['low_stock_threshold'] }}</td>
+                <td data-label="建議補量" class="num"><b>{{ p['suggest'] }}</b></td>
+                <td data-label="狀態" class="chips">
+                    {% if p['onorder'] %}<span class="chip info">已下訂 {{ p['onorder'] }}</span>
+                    {% else %}<span class="chip bad">尚未下訂</span>{% endif %}
+                </td>
+                <td data-label="供應商">{{ p['supplier_name'] or '—' }}</td>
+                <td data-label="操作">
+                    <a class="btn sm ghost" href="{{ url_for('order_new', product_id=p['id'], qty=p['suggest']) }}">建立採購單</a>
+                    <a class="btn sm ghost" href="{{ url_for('stock_in', product_id=p['id']) }}">入庫</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="pane"><div class="pane-b"><div class="empty">
+    <div class="h">{% if has_threshold %}目前沒有低於門檻的料{% else %}還沒有設定任何補貨門檻{% endif %}</div>
+    <div class="p">{% if has_threshold %}有設門檻的 {{ has_threshold }} 項料目前都夠用。{% else %}沒有門檻就算不出短缺——顯示「短缺 0」會讓人以為一切正常,其實是「不知道」。補貨規劃會用最近 90 天的實際出庫量幫你推導建議門檻,可以一次套用。{% endif %}</div>
+    <div class="btnrow" style="justify-content:center">
+        <a class="btn{% if not has_threshold %}{% else %} ghost{% endif %}" href="{{ url_for('planning_page') }}">前往補貨規劃</a>
+        <a class="btn ghost" href="{{ url_for('index') }}">回庫存總覽</a>
+    </div>
+</div></div></div>
+{% endif %}
+
+<h2>效期警示</h2>
+{% if expiring %}
+<div class="pane">
+    <div class="pane-h">30 天內到期或已過期的批次<span class="r">{{ expiring|length }} 批</span></div>
+    <div class="table-scroll">
+        <table class="cards">
+            <tr><th>批號</th><th>名稱</th><th class="num">剩餘</th><th>有效期</th><th>狀態</th><th>操作</th></tr>
+            {% for l in expiring %}
+            <tr{% if l['expired'] %} class="low-stock"{% endif %}>
+                <td data-label="批號" class="mono">{{ l['lot_no'] }}</td>
+                <td data-label="名稱"><a class="plain" href="{{ url_for('product_detail', pid=l['product_id']) }}">{{ l['name'] }}</a></td>
+                <td data-label="剩餘" class="num">{{ l['qty_remaining'] }}{{ l['unit'] }}</td>
+                <td data-label="有效期" class="mono">{{ l['expiry_date'] }}</td>
+                <td data-label="狀態" class="chips">
+                    {% if l['expired'] %}<span class="chip expired">已過期</span>
+                    {% else %}<span class="chip act">剩 {{ l['days_left'] }} 天</span>{% endif %}
+                </td>
+                <td data-label="操作"><a class="btn sm ghost" href="{{ url_for('stock_out', product_id=l['product_id']) }}">出庫</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+{% else %}
+<p class="note">沒有即將到期的批次(僅統計有設定有效期的批次)。</p>
+{% endif %}
+"""
+
 
 PAGE_PRODUCT_FORM = """
 <h1>{{ title }}</h1>
@@ -1770,13 +1934,42 @@ PAGE_SUPPLIER_FORM = """
 
 PAGE_REPORT = """
 <h1>庫存報表</h1>
-<form method="get" class="filters">
-    起 <input type="date" name="start" value="{{ start }}">
-    迄 <input type="date" name="end" value="{{ end }}">
-    <input type="submit" value="套用區間">
-    <a class="plain" href="{{ url_for('report') }}">清除</a>
-</form>
-<p class="note">入庫/出庫總量統計{% if start or end %}套用上方日期區間{% else %}為全部期間{% endif %};「目前庫存」「庫存價值」「平均成本」一律為現時狀態。</p>
+<div class="pane">
+    <div class="pane-h">這份報表在說什麼<span class="r">
+        <form method="get" class="filters" style="margin:0">
+            起 <input type="date" name="start" value="{{ start }}">
+            迄 <input type="date" name="end" value="{{ end }}">
+            <input type="submit" value="套用區間">
+            <a class="plain" href="{{ url_for('report') }}">清除</a>
+        </form></span></div>
+    <div class="pane-b">
+    <div class="stat-row">
+        {% for k in verdicts %}
+        <div class="stat-box {{ k['tone'] }}">
+            <div class="stat-cap">{{ k['label'] }}</div>
+            <div class="stat-num"{% if k['id'] %} id="{{ k['id'] }}"{% endif %}{% if k['small'] %} style="font-size:18px"{% endif %}>{{ k['value'] }}</div>
+            <div class="stat-cap">{{ k['say'] }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    <p class="note">入庫/出庫總量統計{% if start or end %}套用上方日期區間{% else %}為全部期間{% endif %};「目前庫存」「庫存價值」「平均成本」一律為現時狀態。</p>
+    </div>
+</div>
+
+<div class="pane">
+    <div class="pane-h">庫齡分析(Inventory Aging)<span class="r">依各批次入庫時間;90 天以上通常代表呆滯風險</span></div>
+    <div class="pane-b">
+    <div class="bars">
+        {% for a in aging %}
+        <div class="bar">
+            <span>{{ a['label'] }}</span>
+            <span class="track"><span class="fill" style="width:{{ a['pct'] }}%;background:{{ a['color'] }}"></span></span>
+            <span class="num mono">{{ a['count'] }} 批</span>
+        </div>
+        {% endfor %}
+    </div>
+    </div>
+</div>
 <div class="table-scroll">
     <table>
         <tr><th>SKU</th><th>名稱</th><th class="num">入庫總量</th><th class="num">出庫總量</th><th class="num">淨變動</th><th class="num">目前庫存</th><th class="num">單價</th><th class="num">平均成本</th><th class="num">庫存價值</th></tr>
@@ -1793,35 +1986,23 @@ PAGE_REPORT = """
             <td class="num" id="value-{{ r['id'] }}">{{ r['value_str'] }}</td>
         </tr>
         {% endfor %}
+        <tfoot>
         <tr>
-            <th colspan="2">總計</th>
-            <th class="num" id="total-in">{{ total_in }}</th>
-            <th class="num" id="total-out">{{ total_out }}</th>
-            <th class="num">{{ total_net }}</th>
-            <th class="num" id="total-qty">{{ total_qty }}</th>
-            <th></th>
-            <th></th>
-            <th class="num" id="total-value">{{ total_value_str }}</th>
+            <td colspan="2">總計</td>
+            <td class="num" id="total-in">{{ total_in }}</td>
+            <td class="num" id="total-out">{{ total_out }}</td>
+            <td class="num">{{ total_net }}</td>
+            <td class="num" id="total-qty">{{ total_qty }}</td>
+            <td></td>
+            <td></td>
+            <td class="num" id="total-value">{{ total_value_str }}</td>
         </tr>
-    </table>
+            </tfoot>
+</table>
 </div>
 <p class="note">平均成本為加權平均成本(存貨計價):僅以尚有剩餘且有登記成本的批次計算,「—」表示無成本資料。</p>
 
 <div class="detail-section">
-    <h2>庫齡分析(Inventory Aging)</h2>
-    <div class="table-scroll">
-        <table>
-            <tr><th>庫齡區間</th><th class="num">在庫數量</th><th class="num">占比</th></tr>
-            {% for b in aging %}
-            <tr>
-                <td>{{ b['label'] }}</td>
-                <td class="num">{{ b['qty'] }}</td>
-                <td class="num">{{ b['pct_str'] }}%</td>
-            </tr>
-            {% endfor %}
-        </table>
-    </div>
-    <p class="note">依各批次入庫時間計算;90 天以上的在庫批次通常代表呆滯風險,建議優先檢視與去化。</p>
 </div>
 
 <div class="detail-section">
@@ -2228,6 +2409,50 @@ PAGE_COUNT_DETAIL = """
 
 PO_STATUS_LABEL = {"ordered": "已下訂", "shipped": "已出貨", "arrived": "已到貨待驗",
                    "closed": "已入庫結案", "cancelled": "已作廢"}
+
+PAGE_ORDER_NEW = """
+<h1>建立採購單</h1>
+<p class="note">這一版一張單一個品項。要一次開多個品項,仍請用<a class="plain" href="{{ url_for('orders_page') }}">上傳明細檔</a>。</p>
+{% if prod %}
+<div class="pickcard">
+    <div>
+        <div class="nm">{{ prod['name'] }}</div>
+        <div class="meta">{{ prod['sku'] }}　·　儲位 {{ prod['location'] or '未設定' }}　·　{{ prod['supplier_name'] or '無供應商' }}</div>
+    </div>
+    <div class="right">
+        <div class="big">{{ prod['available'] }}</div>
+        <div class="meta">目前可用({{ prod['unit'] }}){% if prod['onorder'] %}　·　已在途 {{ prod['onorder'] }}{% endif %}　·　<a href="{{ url_for('pick', to='order_new') }}">換一項料</a></div>
+    </div>
+</div>
+<form method="post">
+    <input type="hidden" name="product_id" value="{{ prod['id'] }}">
+    <label for="oq">訂購數量 <span class="req">必填</span></label>
+    <input id="oq" class="w-qty" type="number" name="ordered_qty" min="1" inputmode="numeric" value="{{ qty }}">
+    <label for="pn">採購單號 <span class="opt">選填</span></label>
+    <p class="field-help">不填會自動編號。</p>
+    <input id="pn" class="w-code" type="text" name="po_no" placeholder="例:PO-20260903-01">
+    <label for="sp">供應商 <span class="opt">選填</span></label>
+    <input id="sp" class="w-code" type="text" name="supplier_name" value="{{ prod['supplier_name'] or '' }}">
+    <label for="et">預計到貨日 <span class="opt">選填</span></label>
+    <input id="et" class="w-code" type="date" name="eta" value="{{ eta }}">
+    <label for="uc">單價 <span class="opt">選填</span></label>
+    <input id="uc" class="w-qty" type="text" name="unit_cost" inputmode="decimal">
+    <label for="nt">備註 <span class="opt">選填</span></label>
+    <input id="nt" type="text" name="note">
+    <input type="submit" value="建立採購單">
+    <p class="note" style="margin-top:12px">建立後這一項會立刻算進「在途」,首頁與商品明細都看得到,避免有人重複下單。</p>
+</form>
+{% else %}
+<div class="pane"><div class="pane-b"><div class="empty">
+    <div class="h">先找到要採購的料</div>
+    <div class="p">用料號、品名或儲位找;找到之後數量與供應商會自動帶入。</div>
+    <div class="btnrow" style="justify-content:center">
+        <a class="btn" href="{{ url_for('pick', to='order_new') }}">先找料</a>
+        <a class="btn ghost" href="{{ url_for('alerts') }}">從短缺佇列挑</a>
+    </div>
+</div></div></div>
+{% endif %}
+"""
 
 PAGE_ORDERS = """
 <h1>採購訂單</h1>
@@ -2985,7 +3210,7 @@ def logout():
 # 庫存總覽(首頁)與低庫存警示
 # ---------------------------------------------------------------------------
 
-def query_products(q="", category="", limit=None, offset=0):
+def query_products(q="", category="", limit=None, offset=0, missing=False):
     # 搜尋同時比對我方 SKU、名稱與各公司別名料號(跨公司料號整合的核心)
     sql = """
         SELECT p.*, s.name AS supplier_name,
@@ -3003,6 +3228,9 @@ def query_products(q="", category="", limit=None, offset=0):
     if category:
         sql += " AND p.category = ?"
         params.append(category)
+    if missing:
+        # 資料待補:沒有儲位(現場找不到東西在哪)或還掛著搬遷時自動編的臨時料號
+        sql += " AND (p.location IS NULL OR p.location = '' OR p.sku LIKE 'TMP-%')"
     sql += " ORDER BY p.id"
     if limit is not None:      # 匯出端點傳 limit=None 取得完整資料
         sql += " LIMIT ? OFFSET ?"
@@ -3015,6 +3243,7 @@ def query_products(q="", category="", limit=None, offset=0):
         r["reserved"] = resv.get(r["id"], 0)
         r["available"] = r["quantity"] - r["reserved"]   # 業界的 on-hand vs available 區分
         r["onorder"] = onord.get(r["id"], 0)             # 已下訂尚未入庫(在途)
+        r["low"] = bool(r["low_stock_threshold"]) and r["available"] <= r["low_stock_threshold"]
     return rows
 
 
@@ -3024,26 +3253,24 @@ INDEX_PER_PAGE = 100
 def render_index(error=None, msg=None):
     q = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
+    cols_full = request.args.get("cols", "") == "full"
+    missing = request.args.get("missing", "") == "1"
     page = max(1, safe_int(request.args.get("page", "1"), 1) or 1)
     db = get_db()
     fetched = query_products(q, category, limit=INDEX_PER_PAGE,
-                             offset=(page - 1) * INDEX_PER_PAGE)
+                             offset=(page - 1) * INDEX_PER_PAGE,
+                             missing=missing)
     has_next = len(fetched) > INDEX_PER_PAGE
-    products = fetched[:INDEX_PER_PAGE]
-    categories = [r["category"] for r in db.execute(
+    rows = fetched[:INDEX_PER_PAGE]
+    categories = [c["category"] for c in db.execute(
         "SELECT DISTINCT category FROM products WHERE category != '' ORDER BY category"
     ).fetchall()]
-    # banner 計數同樣以可用量為準,與警示頁一致
-    resv_all = reserved_map()
-    low_count = sum(1 for r in db.execute(
-        "SELECT id, quantity, low_stock_threshold FROM products WHERE low_stock_threshold > 0"
-    ).fetchall() if (r["quantity"] - resv_all.get(r["id"], 0)) <= r["low_stock_threshold"])
-    po_summary = po_status_summary()
-    return render_page(PAGE_INDEX, products=products, q=q, category=category,
-                       categories=categories, low_count=low_count,
-                       po_summary=po_summary, po_labels=PO_STATUS_LABEL,
-                       po_summary_total=sum(v["orders"] for v in po_summary.values()),
-                       pager=build_pager("index", page, has_next, q=q, category=category),
+    return render_page(PAGE_INDEX, rows=rows, q=q, category=category,
+                       categories=categories, cols_full=cols_full, missing=missing,
+                       page=page,
+                       pager=build_pager("index", page, has_next, q=q, category=category,
+                                         **({"cols": "full"} if cols_full else {}),
+                                         **({"missing": "1"} if missing else {})),
                        error=error, msg=msg, page_title="庫存總覽")
 
 
@@ -3058,6 +3285,7 @@ def index():
 def alerts():
     db = get_db()
     resv = reserved_map()
+    onord = onorder_map()
     rows = []
     # 低庫存以「可用量」判斷:已被預留的量不該算成可動用庫存
     for r in db.execute("""
@@ -3069,7 +3297,12 @@ def alerts():
         d = dict(r)
         d["reserved"] = resv.get(r["id"], 0)
         d["available"] = r["quantity"] - d["reserved"]
+        d["onorder"] = onord.get(r["id"], 0)
         if d["available"] <= r["low_stock_threshold"]:
+            # 建議補量:以補貨規劃推導的再訂購點為目標,扣掉可用量與已在途的量
+            _ss, rop = suggest_safety_stock(r, usage_stats(r["id"]))
+            target = rop or r["low_stock_threshold"]
+            d["suggest"] = max(0, target - d["available"] - d["onorder"])
             rows.append(d)
     # 即將到期批次(30 天內)與已過期批次:FEFO 料件的呆滯與報廢風險
     horizon = (today_local() + timedelta(days=30)).isoformat()
@@ -3088,7 +3321,10 @@ def alerts():
         except ValueError:
             d["days_left"] = 0
         expiring.append(d)
-    return render_page(PAGE_ALERTS, products=rows, expiring=expiring, page_title="短缺與效期")
+    has_threshold = db.execute(
+        "SELECT COUNT(*) AS c FROM products WHERE low_stock_threshold > 0").fetchone()["c"]
+    return render_page(PAGE_ALERTS, products=rows, expiring=expiring,
+                       has_threshold=has_threshold, page_title="短缺與效期")
 
 
 # ---------------------------------------------------------------------------
@@ -3458,6 +3694,7 @@ PICK_TARGETS = {
     "out":     ("出庫登記 · 先找到料", "stock_out"),
     "history": ("異動歷史 · 先找到料", "history"),
     "reserve": ("建立預留 · 先找到料", "reservations_page"),
+    "order_new": ("建立採購單 · 先找到料", "order_new"),
 }
 
 
@@ -3926,6 +4163,56 @@ def supplier_delete(sid):
 # 報表
 # ---------------------------------------------------------------------------
 
+
+def report_verdicts(rows, aging, accuracy_info, total_value):
+    """報表最上面的四張判讀卡:數字必須附一句白話結論。
+    算不出來就說算不出來並解釋原因——顯示一個 0 會被當成真的。"""
+    db = get_db()
+    total = len(rows)
+    priced = sum(1 for r in rows if (r["unit_price"] or 0) > 0)
+    stale = next((a["count"] for a in aging if a["key"] == "90+"), 0)
+    lots_ok = not db.execute("""
+        SELECT 1 FROM products p WHERE p.quantity <> COALESCE(
+            (SELECT SUM(l.qty_remaining) FROM lots l WHERE l.product_id = p.id), 0) LIMIT 1
+    """).fetchone()
+    out = []
+    if accuracy_info:
+        acc = float(accuracy_info["accuracy_str"] or 0)
+        tone = "good" if acc >= 95 else "warn" if acc >= 90 else "bad"
+        say = ("達到業界標準(95~99%)。" if acc >= 95 else
+               "低於業界標準 95%,建議提高盤點頻率。" if acc >= 90 else
+               "帳實差距偏大,建議先盤 A 類與異動頻繁的料。")
+        out.append({"label": "帳實相符率", "value": accuracy_info["accuracy_str"] + "%",
+                    "say": say + f"依據:{accuracy_info['name']}", "tone": tone,
+                    "id": "accuracy-value", "small": False})
+    else:
+        out.append({"label": "帳實相符率", "value": "尚無盤點紀錄",
+                    "say": "做完第一次循環盤點後,這裡會出現準確率(業界標準 95~99%)。",
+                    "tone": "", "id": "", "small": True})
+    if total:
+        pct = round(stale * 100 / total)
+        out.append({"label": "呆滯庫存(90 天以上未動)", "value": f"{stale:,} 項",
+                    "say": (f"占全部 {total:,} 項的 {pct}%。" +
+                            ("多數是搬遷進來的期初庫存,尚未產生新異動。" if pct >= 80 else
+                             "建議檢視是否可以退料、改用或報廢。")),
+                    "tone": "bad" if pct >= 50 else "warn" if pct >= 20 else "good",
+                    "id": "", "small": False})
+    if priced == 0 and total:
+        out.append({"label": "庫存總價值", "value": "無法計算",
+                    "say": f"{total:,} 項的單價都是 0。要看價值必須先補單價,ABC 分析同理。",
+                    "tone": "", "id": "", "small": True})
+    else:
+        out.append({"label": "庫存總價值", "value": total_value,
+                    "say": (f"依現時庫存與單價計算;{total - priced:,} 項未設單價未計入。"
+                            if priced < total else "全部品項都有單價,價值可信。"),
+                    "tone": "good", "id": "", "small": False})
+    out.append({"label": "批次帳一致性", "value": "100%" if lots_ok else "有帳差",
+                "say": ("每項商品的批次剩餘量加總與現貨完全相符,沒有帳差。" if lots_ok else
+                        "有商品的批次剩餘量與現貨不符,請檢查稽核紀錄。"),
+                "tone": "good" if lots_ok else "bad", "id": "", "small": False})
+    return out
+
+
 @app.route("/report")
 @login_required
 def report():
@@ -3978,16 +4265,25 @@ def report():
         r["abc"] = "A" if prev_pct < 80 else ("B" if prev_pct < 95 else "C")
     # 庫齡分析(Inventory Aging):在庫批次依庫齡分桶
     now_utc = datetime.now(timezone.utc)
-    buckets = [["0-30 天", 0, 30, 0], ["31-60 天", 31, 60, 0], ["61-90 天", 61, 90, 0], ["90 天以上", 91, None, 0]]
+    buckets = [["0-30 天", 0, 30, 0, 0, "0-30"], ["31-60 天", 31, 60, 0, 0, "31-60"],
+               ["61-90 天", 61, 90, 0, 0, "61-90"], ["90 天以上", 91, None, 0, 0, "90+"]]
     for l in db.execute("SELECT qty_remaining, received_at FROM lots WHERE qty_remaining > 0").fetchall():
         age = (now_utc - parse_utc(l["received_at"])).days
         for b in buckets:
             if age >= b[1] and (b[2] is None or age <= b[2]):
                 b[3] += l["qty_remaining"]
+                b[4] += 1              # 批數:長條與判讀卡用「幾項」而不是「幾件」
                 break
     aging_total = sum(b[3] for b in buckets)
-    aging = [{"label": b[0], "qty": b[3],
-              "pct_str": fmt_num(b[3] / aging_total * 100) if aging_total > 0 else "0"} for b in buckets]
+    count_total = sum(b[4] for b in buckets) or 1
+    # 顏色由「意思」決定:越舊越接近警示色,不是依位置輪流換色
+    tone = {"0-30": "var(--onhand)", "31-60": "var(--onhand)",
+            "61-90": "var(--amber)", "90+": "var(--fault)"}
+    aging = [{"label": b[0], "qty": b[3], "count": b[4], "key": b[5],
+              "pct": round(b[4] * 100 / count_total, 1),
+              "color": tone[b[5]],
+              "pct_str": fmt_num(b[3] / aging_total * 100) if aging_total > 0 else "0"}
+             for b in buckets]
     # XYZ 分級(依需求變異係數)與 ABC-XYZ 組合:價值之外再看穩定度
     for r in abc_rows:
         stats = usage_stats(r["id"])
@@ -4013,6 +4309,7 @@ def report():
         total_net=sum(r["net"] for r in rows),
         total_qty=sum(r["quantity"] for r in rows),
         total_value_str=fmt_money(total_value), page_title="庫存報表",
+        verdicts=report_verdicts(rows, aging, accuracy_info, fmt_money(total_value)),
     )
 
 
@@ -4404,6 +4701,63 @@ def render_order_detail(oid, error=None, msg=None):
                        onorder_total=onorder_total, receipts=receipts,
                        labels=PO_STATUS_LABEL, step_index=step,
                        today=today_local().isoformat(), error=error, msg=msg, page_title="採購單明細", back_url=url_for('orders_page'), back_label="回採購單清單")
+
+
+
+@app.route("/orders/new", methods=["GET", "POST"])
+@login_required
+def order_new():
+    """手動建立採購單(單一品項)。把系統最後一條死路接通:
+    以前在短缺佇列看到要補貨,只能自己記下料號、切到採購單、用 Excel 生一個檔再上傳。"""
+    db = get_db()
+    prod = product_or_none(request.form.get("product_id") or request.args.get("product_id", ""))
+    qty = request.form.get("ordered_qty") or request.args.get("qty", "")
+    eta = request.args.get("eta", "")
+    error = None
+    if request.method == "POST":
+        n = safe_int(str(qty))
+        if prod is None:
+            error = "找不到指定的商品"
+        elif n is None or n <= 0:
+            error = "訂購數量必須是大於 0 的整數"
+        elif n > MAX_QUANTITY:
+            error = "訂購數量過大,請確認輸入"
+        else:
+            ts = now_str()
+            po_no = request.form.get("po_no", "").strip()
+            supplier_name = request.form.get("supplier_name", "").strip()
+            sup = db.execute("SELECT id FROM suppliers WHERE name = ?", (supplier_name,)).fetchone()
+            cur = db.execute("""
+                INSERT INTO purchase_orders (po_no, supplier_id, supplier_name, status, eta,
+                                             note, username, created_at)
+                VALUES (?, ?, ?, 'ordered', ?, ?, ?, ?)
+            """, (po_no, sup["id"] if sup else None, supplier_name,
+                  request.form.get("eta", "").strip(), request.form.get("note", "").strip(),
+                  session.get("username", ""), ts))
+            oid = cur.lastrowid
+            if not po_no:
+                po_no = f"PO-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{oid}"
+                db.execute("UPDATE purchase_orders SET po_no = ? WHERE id = ?", (po_no, oid))
+            cost = request.form.get("unit_cost", "").strip()
+            try:
+                unit_cost = float(cost) if cost else None
+                if unit_cost is not None and not math.isfinite(unit_cost):
+                    unit_cost = None
+            except (ValueError, OverflowError):
+                unit_cost = None
+            db.execute("""
+                INSERT INTO purchase_order_items (po_id, line_no, raw_sku, raw_name, product_id,
+                                                  match_type, match_note, ordered_qty, received_qty,
+                                                  unit_cost, eta, note)
+                VALUES (?, 1, ?, ?, ?, 'sku', '手動建立', ?, 0, ?, ?, '')
+            """, (oid, prod["sku"], prod["name"], prod["id"], n, unit_cost,
+                  request.form.get("eta", "").strip()))
+            audit("建立採購單", "purchase_order", oid, f"{po_no} · {prod['sku']} × {n}")
+            db.commit()
+            return redirect(url_for("order_detail", oid=oid))
+    return render_page(PAGE_ORDER_NEW, prod=prod, qty=qty, eta=eta, error=error,
+                       title="建立採購單", page_title="建立採購單", narrow=True,
+                       back_url=url_for("orders_page"), back_label="回採購單清單")
 
 
 @app.route("/orders/<int:oid>")
