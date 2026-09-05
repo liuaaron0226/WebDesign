@@ -866,6 +866,24 @@
   - 驗證:`公司內網架站指南.md` 存在且包含上述七個小節。
 - [ ] **說明中不出現未解釋的專有名詞**;必須出現的(例如要照打的指令)後面用一句話說明。
   - 驗證:人工檢視。
+
+### 打包給使用者的 ZIP 必須在 Windows 上打得開
+
+> 實際踩到:第一版用 Linux 的 `zip -r` 打包,檔名含中文。ZIP 規定非英數檔名要立起
+> 「UTF-8」旗標,Info-ZIP 預設不立,Windows 就改用 Big5 解讀 UTF-8 位元組,
+> 解出亂碼後 Explorer 直接跳「壓縮資料夾無效」——而同一個檔在 Linux 上
+> `unzip -t` 顯示完全正常。使用者拿到的是一個完全打不開的檔案。
+
+- [ ] **打包一律由 `make_package.py` 產生**,不手打 `zip` 指令。
+  - 驗證:`python make_package.py <輸出目錄>` 產生 ZIP 並自我檢查通過。
+- [ ] **壓縮檔內的所有路徑都是純 ASCII**。
+  - 驗證:`python -c "import zipfile;print(all(i.filename.isascii() for i in zipfile.ZipFile('<zip>').infolist()))"` 為 True。
+- [ ] **打包腳本在產出非 ASCII 路徑或損毀檔案時要中止**,不可以默默出一個壞包。
+  - 驗證:`make_package.py` 含 `testzip()` 與 `isascii()` 檢查且失敗時 `sys.exit`。
+- [ ] **打包後解壓縮到全新目錄仍可直接啟動**,且 `requirements.txt` 維持 UTF-16、
+      `.bat` 維持 CRLF(編碼在壓縮/解壓縮往返後不可被改動)。
+  - 驗證:解壓後 `file requirements.txt` 顯示 UTF-16、`file start_inventory.bat` 顯示 CRLF,
+    且 `bash start_inventory.sh` 能起服務並印出內網網址。
 - [ ] **回歸**:第一至第十二階段全部條目維持通過;`python test_inventory.py` 全綠。
 
 ## 使用者自訂要求(請在此新增你在意的驗收項目)
