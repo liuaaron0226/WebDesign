@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.09.05"
+APP_VERSION = "2026.09.05b"
 
 app = Flask(__name__)
 
@@ -510,6 +510,23 @@ def local_ip():
     except OSError:
         pass
     return ""
+
+
+def public_base_url():
+    """料架標籤的 QR 要給手機掃,所以網址不能是 localhost。
+    管理員多半是在伺服器那台電腦上開 http://localhost:5000 按列印
+    (start_inventory.bat 就是自動開這個位址),而 localhost 在手機上指向手機自己,
+    整批印出來的標籤會一張都掃不開。本機位址一律換成內網 IP;
+    要固定成別的位址(例如有 DNS 名稱)就設 PUBLIC_BASE_URL。"""
+    fixed = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if fixed:
+        return fixed
+    host, _, port = request.host.partition(":")
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        ip = local_ip()
+        if ip:
+            return f"http://{ip}" + (f":{port}" if port else "")
+    return request.host_url.rstrip("/")
 
 
 def now_str():
@@ -1275,14 +1292,81 @@ LAYOUT = """
                  font-size: var(--t2); }
         footer .ver { font-family: var(--font-code); color: var(--text); }
 
+        /* 商品詳細頁的主要動作。第 1 批清掉首頁動作磚時把這一區的樣式一併移除了,
+           .action-links / .primary 之後一直沒有樣式,實測手機上只有 17px 高、
+           還用 emoji 當圖示——掃完料架 QR 之後最常做的兩件事就長這樣。 */
+        .action-links { display: flex; flex-wrap: wrap; gap: var(--s2); margin: var(--s4) 0; }
+        .action-links a { display: inline-flex; align-items: center; gap: var(--s2);
+                          min-height: 44px; padding: 0 var(--s4); border-radius: var(--r-ctl);
+                          border: 1px solid var(--line-str); background: var(--card);
+                          color: var(--text); text-decoration: none; font-size: var(--t3);
+                          font-weight: 700; box-shadow: 0 1px 0 var(--shadow-1); }
+        .action-links a svg { width: 18px; height: 18px; flex-shrink: 0; }
+        .action-links a:hover { border-color: var(--hull); }
+        .action-links a:active { transform: translateY(1px); box-shadow: none; }
+        .action-links a.primary { background: var(--hull); border-color: var(--hull); color: #fff; }
+        .action-links a.primary:hover { background: var(--hull-2); }
+        .action-links a.primary.out { background: var(--amber); border-color: var(--amber);
+                                      color: var(--amber-on); }
+        .action-links a.primary.out:hover { filter: brightness(1.06); }
+
+        /* 手機常駐工具列。桌面的 nav 是 sticky,760px 以下卻被覆寫成 static——
+           實測 /history 手機版整頁 54,999px,捲到 2,000px 時 nav 已經在 −1,952px,
+           要換頁得先捲回最頂端。最需要常駐導覽的裝置反而沒有。
+           桌面完全不出現,列印也不出現。 */
+        .tabbar { display: none; }
+        .tabbar .who { display: block; padding: var(--s3) var(--s4); color: var(--on-hull-2);
+                       font-size: var(--t2); border-bottom: 1px solid var(--hull-3); }
+
         @media print {
-            .topbar, nav, footer, .no-print, .filters, form { display: none !important; }
+            /* 印出來的是「單據」不是「畫面」。舊版這裡有一條
+               form { display: none !important; },而盤點單與收貨單的整張明細表格
+               就包在 form 裡——實測 /counts/<id> 螢幕上 50 列輸入格,印成 A4 只剩
+               1 頁 290 個字,一列料都沒有。倉管拿著那張紙走進倉庫是盤不了點的。
+               所以這裡改成:拿掉「操作用」的元件,留下「單據本身」。 */
+            .topbar, nav, footer, .rail, .tabbar, .no-print, .filters,
+            .savebar, .btnrow, .pager, .crumb, .msg, .action-links, .pane-h .r,
+            input[type=submit], input[type=file], button, .btn, .small-btn { display: none !important; }
+            form { display: block !important; }
             .container { max-width: none; margin: 0; padding: 0; }
             .pane { box-shadow: none; border: none; }
-            .pane-h { background: var(--white); color: #000; border-bottom: 2px solid #000; }
-            th { background: var(--white); color: #000; border-bottom: 2px solid #000; }
-            body { background: var(--white); }
+            .table-scroll { overflow: visible !important; }
+            /* 從手機按列印時視窗寬度 < 760px,卡片式表格會跟著套用,
+               印出來是一疊卡片而不是一張表。列印一律還原成表格。 */
+            table, table.cards { display: table !important; width: 100% !important; }
+            table.cards tbody { display: table-row-group !important; }
+            table.cards tr, table.cards tr:first-child {
+                display: table-row !important; border: none !important;
+                margin: 0 !important; padding: 0 !important; }
+            table.cards td { display: table-cell !important; text-align: left;
+                             border: none; border-bottom: 1px solid #999 !important; }
+            table.cards td::before { content: none !important; }
+            /* 列印永遠白底黑字:深色模式的色票會讓整張單印成黑底,吃掉整支碳粉匣 */
+            body, .pane, .pane-b, .card, table, tr, td, th, .stat-box {
+                background: #fff !important; color: #000 !important;
+                box-shadow: none !important; }
+            .pane-h { background: #fff !important; color: #000 !important;
+                      border-bottom: 2px solid #000; }
+            th { background: #fff !important; color: #000 !important;
+                 border-bottom: 2px solid #000; }
+            a { color: #000 !important; text-decoration: none !important; }
+            /* 表頭每頁重印、資料列與標籤不被分頁切成兩半 */
+            thead { display: table-header-group; }
+            tr, .label, .stat-box { page-break-inside: avoid; }
+            /* 實盤數/實收數要留成可以用原子筆填的空格,不是藏起來的輸入框 */
+            input[type=number], input[type=text], input[type=date], select {
+                display: inline-block !important; border: 1px solid #000 !important;
+                background: #fff !important; color: #000 !important; min-width: 56px;
+                height: 26px !important; min-height: 0 !important; padding: 0 4px !important;
+                -webkit-appearance: none; appearance: none; box-shadow: none !important; }
+            input::placeholder { color: transparent !important; }
+            /* 紙張很貴:一張 120 列的盤點單原本要 8 頁,收緊列高後省一半 */
+            td, th { padding: 3px 6px !important; font-size: 11px !important; line-height: 1.3; }
+            h1 { font-size: 17px; margin: 0 0 6px; }
+            .stat-row { gap: 6px; }
+            .stat-num { font-size: 18px !important; }
             .label { border-color: #999; }
+            @page { margin: 12mm 10mm; }
         }
 
         @media (max-width: 760px) {
@@ -1308,6 +1392,10 @@ LAYOUT = """
                              padding: var(--s2) var(--s3); background: var(--card); }
             table.cards tr.low-stock { border-left-color: var(--fault); background: var(--fault-soft); }
             table.cards tr.low-stock td { background: transparent; }
+            /* 桌面版靠 td:first-child 的內陰影畫出左邊那條紅線,但卡片版把「名稱」
+               和「現貨」用 order 提到前面,DOM 的第一格(料號)會落在卡片中間,
+               紅線就變成一段浮在字上的紅槓。卡片本身已經有紅色左框了。 */
+            table.cards tr.low-stock td:first-child { box-shadow: none; }
             table.cards td { display: flex; justify-content: space-between; align-items: center;
                              gap: var(--s3); border: none; box-shadow: none; padding: 6px 0;
                              text-align: right; border-bottom: 1px dashed var(--line); }
@@ -1344,6 +1432,96 @@ LAYOUT = """
             .pickrow { flex-wrap: wrap; min-height: 60px; }
             .pickrow .sku { min-width: 0; flex-basis: 100%; }
             .pickcard .right { margin-left: 0; text-align: left; }
+
+            /* ---- 手機常駐工具列 ---- */
+            /* 分頁列在手機上交給底部工具列,省下 35px 又永遠構得到。
+               但功能一項都不能因此消失,所以「更多」面板要涵蓋原本 nav 的全部項目。 */
+            nav { display: none; }
+            .user-info { display: none; }
+            /* top: auto 是必要的:.tabbar 本身是 <nav>,會吃到基底的
+               nav { position: sticky; top: 48px },fixed 元素同時有 top 與 bottom
+               就會被拉開成整個畫面高(實測 796px)。 */
+            .tabbar { display: grid; grid-template-columns: repeat(5, 1fr);
+                      position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 60;
+                      padding: 0; border-bottom: none;
+                      background: var(--hull); border-top: 1px solid var(--hull-3);
+                      box-shadow: 0 -2px 10px rgba(6, 14, 28, .28);
+                      padding-bottom: env(safe-area-inset-bottom, 0px); }
+            .tabbar > a, .tabbar > details > summary {
+                      display: flex; flex-direction: column; align-items: center;
+                      justify-content: center; gap: 3px; min-height: 54px; padding: 4px 2px;
+                      color: var(--on-hull-2); text-decoration: none; font-size: 11px;
+                      line-height: 1.2; list-style: none; cursor: pointer;
+                      border-top: 3px solid transparent; }
+            .tabbar > details > summary::-webkit-details-marker { display: none; }
+            .tabbar svg { width: 21px; height: 21px; stroke: currentColor; fill: none;
+                          stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+            .tabbar > a.active { color: var(--amber); border-top-color: var(--amber); }
+            .tabbar > a:active, .tabbar > details > summary:active { background: var(--hull-2); }
+            .tabbar a:focus-visible, .tabbar summary:focus-visible {
+                      outline: 3px solid var(--amber); outline-offset: -3px; }
+            .tabbar details[open] > summary { color: var(--amber); background: var(--hull-2); }
+            /* 面板往上開。fixed 定位才不會被工具列自己的 overflow 裁掉,
+               高度上限留給頁面內容,項目多時面板自己捲。 */
+            .tabbar .more-panel { position: fixed; left: 0; right: 0;
+                      bottom: calc(54px + env(safe-area-inset-bottom, 0px));
+                      max-height: 68vh; overflow-y: auto; background: var(--hull-2);
+                      border-top: 1px solid var(--hull-3);
+                      box-shadow: 0 -6px 18px rgba(6, 14, 28, .4); }
+            .tabbar .more-panel .grp { padding: var(--s3) var(--s4) 2px; color: var(--on-hull-2);
+                      font-size: 11px; letter-spacing: .08em; }
+            .tabbar .more-panel a { display: flex; align-items: center; min-height: 48px;
+                      padding: 0 var(--s5); color: #fff; text-decoration: none;
+                      font-size: var(--t3); border-top: 1px solid var(--hull-3); }
+            .tabbar .more-panel a.active { color: var(--amber); }
+            .tabbar .more-panel a:active { background: var(--hull-3); }
+            /* 工具列是浮在內容上的,不留這段內距就會蓋住頁尾與最後一列資料 */
+            body { padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)); }
+
+            /* ---- 觸控目標 ---- */
+            /* 目標是 44px(WCAG 2.5.5 / Apple HIG)。實測修改前:盤點與收貨的
+               數量輸入格只有 20px、商品頁的入庫出庫連結 17px、頂列登出 15px。
+               現場戴著工作手套,20px 的格子按不進去。 */
+            input:not([type=hidden]):not([type=checkbox]):not([type=radio]),
+            select, textarea, button, .btn, .small-btn, summary {
+                      min-height: 44px !important; }
+            .count-input, .count-note { height: 44px !important; }
+            .topbar .gsearch input[type=search] { height: 44px; }
+            /* 純文字連結沒有內距,天生就只有一行字高。表格與面板標題列裡的
+               操作連結要撐開成可以按的區塊。 */
+            td a.plain, .action-links a, .pane-h .r a, .crumb a,
+            .pager a, .filters label, .filters a, .detail-section a.plain, .import-help a.plain,
+            .note a.plain, .head .acts a, .pane-b a.plain {
+                      display: inline-flex; align-items: center; min-height: 44px; }
+            /* 面板標題列在手機上要疊起來。橫排時「明細」兩個字被四個操作連結
+               擠成一直行(明/細 各佔一列),看起來像壞掉。 */
+            .pane-h { flex-wrap: wrap; align-items: flex-start;
+                      padding: 6px var(--s3); gap: 0; }
+            .pane-h .r { flex-basis: 100%; margin-left: 0; display: flex; flex-wrap: wrap;
+                         gap: 0 var(--s3); align-items: center; }
+            .head .acts { margin-left: 0; }
+            .pager a { padding: 0 var(--s3); }
+            /* 現場是站在貨架前看這一頁的,四格統計不該把清單推到一個半螢幕以外 */
+            .stat-row { gap: var(--s2); margin: var(--s3) 0 var(--s3); }
+            .stat-box { flex: 1 1 44%; padding: var(--s2) var(--s3); }
+            .stat-num { font-size: 22px; }
+            .stat-cap { font-size: var(--t1); }
+            /* 相鄰目標留 8px 以上,免得誤觸隔壁 */
+            .filters { gap: var(--s3); }
+            .action-links { gap: var(--s2); }
+            .action-links a { flex: 1 1 46%; justify-content: center; }
+            /* 篩選列原本刻意壓成 38px 求密度,但那是桌面的權衡;
+               手機上按不到就不是密度問題,是功能問題。 */
+            .filters input[type=submit] { min-height: 44px !important; }
+        }
+
+        /* 橫拿手機(高度矮)時工具列縮一點,免得吃掉整個畫面 */
+        @media (max-width: 760px) and (max-height: 460px) {
+            .tabbar > a, .tabbar > details > summary { min-height: 44px; font-size: 10px; }
+            .tabbar svg { width: 17px; height: 17px; }
+            .tabbar .more-panel { bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+                                  max-height: 60vh; }
+            body { padding-bottom: calc(52px + env(safe-area-inset-bottom, 0px)); }
         }
     </style>
 </head>
@@ -1418,6 +1596,51 @@ LAYOUT = """
         __BODY__
     </div>
     <footer>庫存管理系統 &copy; {{ year }}　·　版本 <span class="ver">{{ app_version }}</span></footer>
+    {% if session.get('user_id') %}
+    {# 手機常駐工具列。四個固定格是「從別的地方走過去」次數最多的作業:
+       入庫、出庫是逐件發生的(一天幾十次),收貨是每次來車就要從任何頁面切過去。
+       盤點不放進來——盤點是一天開一次盤點單、然後整天待在那一頁,
+       放進來會排擠掉真正需要隨時切換的入口。盤點在「更多」第一個位置。 #}
+    <nav class="tabbar" aria-label="主要功能">
+        <a {% if request.path == '/' %}class="active" {% endif %}href="{{ url_for('index') }}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5"/><path d="M6 9.8V20h12V9.8"/><path d="M10 20v-5.5h4V20"/></svg>總覽</a>
+        <a {% if request.path == '/stock/in' %}class="active" {% endif %}href="{{ url_for('stock_in') }}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10"/><path d="M8 9.5l4 4 4-4"/><path d="M4 16v3.5h16V16"/></svg>入庫</a>
+        <a {% if request.path == '/stock/out' %}class="active" {% endif %}href="{{ url_for('stock_out') }}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14V4"/><path d="M8 7.5l4-4 4 4"/><path d="M4 16v3.5h16V16"/></svg>出庫</a>
+        <a {% if request.path.startswith('/receipts') %}class="active" {% endif %}href="{{ url_for('receipts_page') }}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 4l8 3.5v9L12 20l-8-3.5z"/><path d="M4 7.5 12 11l8-3.5"/><path d="M12 11v9"/></svg>收貨</a>
+        <details class="more">
+            <summary aria-label="更多功能">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>更多</summary>
+            <div class="more-panel">
+                <span class="who">{{ session.get('username') }}{% if session.get('is_admin') %}(管理員){% endif %}</span>
+                <span class="grp">現場收發</span>
+                <a {% if request.path.startswith('/counts') %}class="active" {% endif %}href="{{ url_for('counts_page') }}">循環盤點</a>
+                <a {% if request.path == '/pick' %}class="active" {% endif %}href="{{ url_for('pick', to='history') }}">找料號</a>
+                <a {% if request.path == '/search/image' %}class="active" {% endif %}href="{{ url_for('image_search') }}">以圖找料</a>
+                <a {% if request.path == '/labels' %}class="active" {% endif %}href="{{ url_for('labels_page') }}">料架標籤</a>
+                <span class="grp">採購進貨</span>
+                <a {% if request.path.startswith('/orders') %}class="active" {% endif %}href="{{ url_for('orders_page') }}">採購單</a>
+                <a {% if request.path == '/alerts' %}class="active" {% endif %}href="{{ url_for('alerts') }}">短缺與效期</a>
+                <a {% if request.path.startswith('/planning') %}class="active" {% endif %}href="{{ url_for('planning_page') }}">補貨規劃</a>
+                <span class="grp">查帳與報表</span>
+                <a {% if request.path == '/report' %}class="active" {% endif %}href="{{ url_for('report') }}">庫存報表</a>
+                <a {% if request.path == '/history' %}class="active" {% endif %}href="{{ url_for('history') }}">異動歷史</a>
+                <a {% if request.path.startswith('/reservations') %}class="active" {% endif %}href="{{ url_for('reservations_page') }}">預留</a>
+                <span class="grp">{% if session.get('is_admin') %}系統設定{% else %}商品資料{% endif %}</span>
+                <a {% if request.path == '/products/new' %}class="active" {% endif %}href="{{ url_for('product_new') }}">新增商品</a>
+                <a {% if request.path.startswith('/suppliers') %}class="active" {% endif %}href="{{ url_for('suppliers') }}">供應商</a>
+                {% if session.get('is_admin') %}
+                <a {% if request.path == '/import' %}class="active" {% endif %}href="{{ url_for('csv_import') }}">CSV 匯入</a>
+                <a {% if request.path.startswith('/users') %}class="active" {% endif %}href="{{ url_for('users_page') }}">帳號管理</a>
+                <a {% if request.path == '/audit' %}class="active" {% endif %}href="{{ url_for('audit_page') }}">稽核紀錄</a>
+                {% endif %}
+                <a href="{{ url_for('logout') }}">登出</a>
+            </div>
+        </details>
+    </nav>
+    {% endif %}
 </body>
 </html>
 """
@@ -1911,7 +2134,10 @@ PAGE_HISTORY = """
 
 PAGE_SUPPLIERS = """
 <h1>供應商管理</h1>
-<p><a class="plain" href="{{ url_for('supplier_new') }}">＋ 新增供應商</a></p>
+<div class="action-links">
+    <a class="primary" href="{{ url_for('supplier_new') }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新增供應商</a>
+</div>
 {% if rows %}
 <div class="table-scroll">
     <table>
@@ -2075,6 +2301,18 @@ PAGE_REPORT = """
 
 PAGE_PRODUCT_DETAIL = """
 <h1>商品詳細:{{ p['name'] }}</h1>
+{# 動作放在規格表之前。這頁最常見的來源是現場掃料架上的 QR,掃完就是要登記進出;
+   放在表格後面時實測手機上「入庫」在 966px 處,得先捲過一整屏才看得到。 #}
+<div class="action-links">
+    <a class="primary" href="{{ url_for('stock_in', product_id=p['id']) }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v10"/><path d="M8 9.5l4 4 4-4"/><path d="M4 16v3.5h16V16"/></svg>入庫</a>
+    <a class="primary out" href="{{ url_for('stock_out', product_id=p['id']) }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 14V4"/><path d="M8 7.5l4-4 4 4"/><path d="M4 16v3.5h16V16"/></svg>出庫</a>
+    <a href="{{ url_for('product_edit', pid=p['id']) }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>編輯基本資料</a>
+    <a href="{{ url_for('history', product_id=p['id']) }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3.5 2"/><circle cx="12" cy="12" r="8.5"/></svg>完整異動歷史</a>
+</div>
 <div class="table-scroll">
     <table class="cards">
         <tr><th>SKU</th><th>儲位</th><th>分類</th><th class="num">現貨</th><th class="num">可用</th><th>單位</th><th class="num">單價</th><th class="num">低庫存門檻</th><th>出庫策略</th><th>供應商</th></tr>
@@ -2099,12 +2337,6 @@ PAGE_PRODUCT_DETAIL = """
         <p class="note">列印貼在料架上,手機掃碼即可直接開啟本頁登記進出。
         <a class="plain" href="{{ url_for('labels_page') }}">批次列印所有標籤</a></p>
     </div>
-</div>
-<div class="action-links">
-    <a class="primary" href="{{ url_for('stock_in', product_id=p['id']) }}"><span class="qa-in">⬇</span> 入庫</a>
-    <a class="primary" href="{{ url_for('stock_out', product_id=p['id']) }}"><span class="qa-out">⬆</span> 出庫</a>
-    <a href="{{ url_for('product_edit', pid=p['id']) }}">編輯基本資料</a>
-    <a href="{{ url_for('history', product_id=p['id']) }}">完整異動歷史</a>
 </div>
 
 <div class="detail-section">
@@ -2402,7 +2634,9 @@ PAGE_COUNT_DETAIL = """
         <a href="{{ url_for('count_detail', cid=c['id'], sort=('loc' if sort != 'loc' else None), filter=filter) }}">{{ '依儲位排序' if sort != 'loc' else '依建檔順序' }}</a>
         <a href="{{ url_for('count_detail', cid=c['id'], sort=sort, filter=('todo' if filter != 'todo' else None)) }}">{{ '只看未盤' if filter != 'todo' else '看全部' }}</a>
         <a href="{{ url_for('count_detail', cid=c['id'], sort=sort, filter=('diff' if filter != 'diff' else None)) }}">{{ '只看有差異' if filter != 'diff' else '看全部' }}</a>
-        第 {{ page }} 頁</span></div>
+        {% if not printing %}<a href="{{ url_for('count_detail', cid=c['id'], sort=sort, filter=filter, print=1) }}">列印整張單</a>
+        第 {{ page }} 頁{% else %}全 {{ items|length }} 列{% endif %}</span></div>
+    {% if printing %}<p class="note no-print">這是整張單的列印版({{ items|length }} 列,不分頁)。按瀏覽器的列印(Ctrl+P)輸出,實盤數欄會印成空格供現場手寫。</p>{% endif %}
     <form method="post" action="{{ url_for('count_record', cid=c['id']) }}">
         <input type="hidden" name="page" value="{{ page }}">
         <input type="hidden" name="sort" value="{{ sort }}">
@@ -2411,7 +2645,7 @@ PAGE_COUNT_DETAIL = """
             <table class="cards">
                 <tr><th>料號</th><th>名稱</th><th>儲位</th><th class="num">系統帳</th>
                     <th class="num">實盤數</th><th class="num">差異</th><th>備註</th>
-                    {% if c['status'] != 'posted' %}<th>單列</th>{% endif %}</tr>
+                    {% if c['status'] != 'posted' %}<th class="no-print">單列</th>{% endif %}</tr>
                 {% for i in items %}
                 <tr id="i{{ i['id'] }}"{% if i['diff'] is not none and i['diff'] != 0 %} class="has-diff"{% endif %}>
                     <td data-label="料號" class="mono">{{ i['sku'] }}</td>
@@ -2440,7 +2674,7 @@ PAGE_COUNT_DETAIL = """
                         {% endif %}
                     </td>
                     {% if c['status'] != 'posted' %}
-                    <td data-label="單列"><button class="small-btn ok-btn" type="submit"
+                    <td data-label="單列" class="no-print"><button class="small-btn ok-btn" type="submit"
                         formaction="{{ url_for('count_record', cid=c['id'], only=i['id']) }}">存這列</button></td>
                     {% endif %}
                 </tr>
@@ -2805,12 +3039,16 @@ PAGE_RECEIPT_DETAIL = """
     <span class="note">照單全收是最常見的情況;按一次就把所有已對應列的實收數填成通知量。</span>
 </div>
 {% endif %}
+<div class="pane-h">明細<span class="r">
+    {% if printing %}全 {{ total }} 列(列印版){% else %}<a href="{{ url_for('receipt_detail', rid=r['id'], print=1) }}">列印這張單</a>{% endif %}
+</span></div>
+{% if printing %}<p class="note no-print">這是列印版({{ total }} 列)。按瀏覽器的列印(Ctrl+P)輸出,實收數欄會印成空格供現場手寫核對。</p>{% endif %}
 <form method="post" action="{{ url_for('receipt_check_all', rid=r['id']) }}">
 <div class="table-scroll">
     <table class="cards">
         <tr><th>行</th><th>檔案料號</th><th>對應商品</th><th class="num">通知量</th>
             <th class="num">實收數</th><th>備註</th><th>批號 / 效期</th>
-            {% if r['status'] == 'open' %}<th>單列</th>{% endif %}</tr>
+            {% if r['status'] == 'open' %}<th class="no-print">單列</th>{% endif %}</tr>
         {% for i in items %}
         <tr id="i{{ i['id'] }}"{% if i['product_id'] is none %} class="has-diff"{% endif %}>
             <td data-label="行">{{ i['line_no'] }}</td>
@@ -2850,7 +3088,7 @@ PAGE_RECEIPT_DETAIL = """
                 {{ i['lot_no'] or '(自動編號)' }}{% if i['expiry_date'] %}<br><span class="alias-cell">效期 {{ i['expiry_date'] }}</span>{% endif %}
             </td>
             {% if r['status'] == 'open' %}
-            <td data-label="單列"><button class="small-btn ok-btn" type="submit"
+            <td data-label="單列" class="no-print"><button class="small-btn ok-btn" type="submit"
                 formaction="{{ url_for('receipt_check_all', rid=r['id'], only=i['id']) }}">存這列</button></td>
             {% endif %}
         </tr>
@@ -3011,6 +3249,30 @@ PAGE_LABELS = """
 {% if not has_qrcode %}
 <div class="msg error">此功能需要安裝 qrcode 套件(pip install qrcode)後重新啟動系統。</div>
 {% else %}
+<form class="filters no-print" method="get">
+    <label for="lb-loc">儲位開頭</label>
+    <input id="lb-loc" type="text" name="loc" value="{{ loc }}" placeholder="例如 A- 或 防潮箱" size="12">
+    <label for="lb-cat">分類</label>
+    <select id="lb-cat" name="category">
+        <option value="">全部分類</option>
+        {% for c in cats %}<option value="{{ c }}"{% if c == category %} selected{% endif %}>{{ c }}</option>{% endfor %}
+    </select>
+    <label for="lb-sku">單一料號</label>
+    <input id="lb-sku" type="text" name="sku" value="{{ sku }}" placeholder="補印一張時用" size="12">
+    <input type="submit" value="篩選">
+    {% if loc or category or sku %}<a class="plain" href="{{ url_for('labels_page') }}">清除</a>{% endif %}
+</form>
+<p class="note no-print">
+    快速選一排貨架:
+    {% for pre in prefixes %}<a class="plain" href="{{ url_for('labels_page', loc=pre) }}">{{ pre }}</a>{% if not loop.last %}　{% endif %}{% endfor %}
+</p>
+<div class="msg ok no-print">
+    這次會印 <b>{{ count }}</b> 張標籤,約 <b>{{ sheets }}</b> 頁 A4。
+    QR 內容指向 <span class="mono">{{ qr_base }}</span> —— 這串位址要是手機在公司網路上打得開的,標籤才掃得動。
+</div>
+{% if not products %}
+<p>目前的篩選條件找不到商品。</p>
+{% endif %}
 <div class="label-sheet">
     {% for p in products %}
     <div class="label">
@@ -4582,10 +4844,19 @@ def render_count_detail(cid, error=None, msg=None):
             params += [limit + 1, offset]
         return db.execute(sql, params).fetchall()
 
-    fetched = rows(COUNT_PER_PAGE, (page - 1) * COUNT_PER_PAGE)
-    has_next = len(fetched) > COUNT_PER_PAGE
+    # 列印模式:紙本盤點單只印一頁 50 列是沒有用的——人拿著半張單走進倉庫,
+    # 剩下的料就沒人盤。列印時一次帶出全部明細,不分頁。
+    printing = request.args.get("print") == "1"
+    if printing:
+        fetched = rows()
+        has_next = False
+        chunk = fetched
+    else:
+        fetched = rows(COUNT_PER_PAGE, (page - 1) * COUNT_PER_PAGE)
+        has_next = len(fetched) > COUNT_PER_PAGE
+        chunk = fetched[:COUNT_PER_PAGE]
     items = []
-    for r in fetched[:COUNT_PER_PAGE]:
+    for r in chunk:
         d = dict(r)
         d["diff"] = (r["counted_qty"] - r["system_qty"]) if r["counted_qty"] is not None else None
         items.append(d)
@@ -4598,8 +4869,8 @@ def render_count_detail(cid, error=None, msg=None):
     return render_page(PAGE_COUNT_DETAIL, c=cd, items=items, total=tot,
                        counted=counted, diff_count=diff_count,
                        page_filled=sum(1 for i in items if i["counted_qty"] is not None),
-                       page=page, sort=sort, filter=filt,
-                       pager=build_pager("count_detail", page, has_next, cid=cid,
+                       page=page, sort=sort, filter=filt, printing=printing,
+                       pager="" if printing else build_pager("count_detail", page, has_next, cid=cid,
                                          **({"sort": sort} if sort else {}),
                                          **({"filter": filt} if filt else {})),
                        error=error, msg=msg, page_title="盤點單",
@@ -5277,8 +5548,10 @@ def render_receipt_detail(rid, error=None, msg=None):
     total_qty = sum(i["expected_qty"] for i in items)
     skipped = "、".join(str(i["line_no"]) for i in items
                         if i["product_id"] is None or not (i["received_qty"] or 0))
+    # 收貨單本來就不分頁,列印模式只是換一句說明並收掉操作類連結
     return render_page(PAGE_RECEIPT_DETAIL, r=rd, items=items, total=len(items),
                        checked=checked, unmatched=unmatched, total_qty=total_qty,
+                       printing=request.args.get("print") == "1",
                        skipped=skipped, error=error, msg=msg, page_title="收貨單明細", back_url=url_for('receipts_page'), back_label="回收貨單清單")
 
 
@@ -5620,7 +5893,7 @@ def product_qr(pid):
     if not HAS_QRCODE:
         return Response("需要安裝 qrcode 套件", status=503, mimetype="text/plain")
     # QR 內容是該商品詳細頁的完整網址:手機掃了就直接開頁面登記進出
-    target = url_for("product_detail", pid=pid, _external=True)
+    target = public_base_url() + url_for("product_detail", pid=pid)
     img = qrcode.make(target)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -5628,12 +5901,54 @@ def product_qr(pid):
                     headers={"Cache-Control": "max-age=3600"})
 
 
+# A4 直式、10mm 邊界下實測一頁約放 24 張標籤(3 欄 × 8 列)
+LABELS_PER_SHEET = 24
+
+
+def location_prefixes(db):
+    """把儲位收斂成可以按的群組。貨架是 A-03-2 這種三段式,取第一段就是一排貨架;
+    「防潮箱3層」「桌上」「Joyce保管」沒有分隔號,整串就是自己的群組。"""
+    seen = []
+    for r in db.execute("SELECT DISTINCT location FROM products WHERE location <> '' ORDER BY location"):
+        loc = r["location"]
+        pre = loc.split("-")[0] if "-" in loc else loc
+        if pre not in seen:
+            seen.append(pre)
+    return seen
+
+
 @app.route("/labels")
 @login_required
 def labels_page():
-    products = get_db().execute(
-        "SELECT id, sku, name, location FROM products ORDER BY location, sku").fetchall()
-    return render_page(PAGE_LABELS, products=products, has_qrcode=HAS_QRCODE, page_title="料架標籤")
+    """整廠 2,279 項料印出來約 98 頁。補印一個櫃子的標籤不該被迫重印整廠,
+    所以這裡收儲位/分類/單一料號三個篩選,並在印之前先說清楚會印幾張幾頁。"""
+    db = get_db()
+    loc = request.args.get("loc", "").strip()
+    category = request.args.get("category", "").strip()
+    sku = request.args.get("sku", "").strip()
+    where, params = [], []
+    if loc:
+        where.append("location LIKE ?")
+        params.append(loc + "%")
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    if sku:
+        where.append("sku = ?")
+        params.append(sku)
+    sql = "SELECT id, sku, name, location FROM products"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY location, sku"
+    products = db.execute(sql, params).fetchall()
+    cats = [r["category"] for r in db.execute(
+        "SELECT DISTINCT category FROM products WHERE category <> '' ORDER BY category")]
+    sheets = (len(products) + LABELS_PER_SHEET - 1) // LABELS_PER_SHEET
+    return render_page(PAGE_LABELS, products=products, has_qrcode=HAS_QRCODE,
+                       loc=loc, category=category, sku=sku,
+                       prefixes=location_prefixes(db), cats=cats,
+                       count=len(products), sheets=sheets,
+                       qr_base=public_base_url(), page_title="料架標籤")
 
 
 # ---------------------------------------------------------------------------
