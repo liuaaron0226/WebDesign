@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.09.05b"
+APP_VERSION = "2026.09.05c"
 
 app = Flask(__name__)
 
@@ -490,26 +490,60 @@ def hamming_distance(h1, h2):
     return bin(int(h1, 16) ^ int(h2, 16)).count("1")
 
 
+# 虛擬網卡的位址範圍。公司電腦常裝了 Docker、VirtualBox、WSL 或 VPN,
+# 它們各自會多一張網卡;拿到那種位址貼給同事,同事永遠連不上而且完全看不出原因。
+VIRTUAL_IP_PREFIXES = tuple(
+    ["127.", "169.254.", "192.168.56.", "192.168.99.", "198.18."]
+    + [f"172.{n}." for n in range(17, 32)]      # Docker 預設橋接網段
+)
+
+
+def is_usable_lan_ip(ip):
+    return bool(ip) and not ip.startswith(VIRTUAL_IP_PREFIXES)
+
+
 def local_ip():
     """取本機在區域網路上的 IP(供同事連線用);取不到回空字串。
-    連 UDP socket 不會真的送出封包,只是讓作業系統選出對外的網卡。"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    連 UDP socket 不會真的送出封包,只是讓作業系統選出對外的那張網卡。"""
+    for probe in ("192.168.1.1", "10.0.0.1", "8.8.8.8"):
         try:
-            s.connect(("192.168.1.1", 1))
-            return s.getsockname()[0]
-        finally:
-            s.close()
-    except OSError:
-        pass
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect((probe, 1))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+        except OSError:
+            continue
+        if is_usable_lan_ip(ip):
+            return ip
     try:   # 離線機器上上一段會失敗,退而用主機名稱解析
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127."):
-                return ip
+            if is_usable_lan_ip(info[4][0]):
+                return info[4][0]
     except OSError:
         pass
     return ""
+
+
+def lan_url(port=None):
+    """同事要輸入的那一行網址。抓不到內網位址時回空字串,呼叫端自己決定怎麼講。"""
+    port = port or int(os.environ.get("PORT", 5000))
+    ip = local_ip()
+    return f"http://{ip}:{port}" if ip else ""
+
+
+def has_any_user():
+    """資料庫裡有沒有任何帳號。沒有的話 /register 是開著的,
+    而在公司內網「開著」等於任何同事都能搶到管理員。"""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        row = con.execute("SELECT COUNT(*) FROM users").fetchone()
+        return bool(row and row[0])
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
 
 
 def public_base_url():
@@ -6265,6 +6299,14 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             sys.exit("用法:python inventory_app.py --import <商品匯入檔>")
         sys.exit(0 if cli_import(sys.argv[2]) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--lan-url":
+        # 啟動腳本用這個把「同事要輸入的那一行」抓進變數,再寫成文字檔。
+        # 直接叫使用者看 ipconfig 會列出四五個位址(還包含虛擬網卡),挑不出來。
+        u = lan_url()
+        if not u:
+            sys.exit("找不到內網位址,請確認這台電腦已接上公司網路")
+        print(u)
+        sys.exit(0)
 
     port = int(os.environ.get("PORT", 5000))
     start_backup_thread()   # 啟動先備份一份,之後每 24 小時自動備份
@@ -6281,6 +6323,16 @@ if __name__ == "__main__":
     else:
         print(f"  同事請開:      http://(本機內網IP):{port}  ← 用 ipconfig 查 IPv4 位址")
     print(f"  (伺服器綁定 0.0.0.0 代表接受所有網卡連線,這串不是可輸入的網址)")
+    # 空資料庫時 /register 是開著的,而且第一個註冊的人就是管理員。
+    # 在公司內網,「開著」等於誰先打開網頁誰就拿到管理員權限——包含還不該有權限的人。
+    if not has_any_user():
+        print("")
+        print("  ============================================================")
+        print("  【還沒有任何帳號】第一個註冊的人會成為管理員。")
+        print("  請你現在就先自己註冊完,再把網址給同事,否則誰先開誰就是管理員。")
+        print("  註冊完之後系統會自動關閉自助註冊,之後的帳號由你在「帳號管理」新增。")
+        print("  ============================================================")
+        print("")
     try:
         # waitress:正式營運級伺服器(純 Python、Windows 友善),取代開發用伺服器
         from waitress import serve

@@ -65,6 +65,8 @@ db.sqlite3-journal
 inventory.db
 inventory.db-wal
 inventory.db-shm
+# 啟動腳本每次算出來的內網網址,隨機器而異,不進版控
+同事連線網址.txt
 inventory_images/
 secret_key.txt
 backups/
