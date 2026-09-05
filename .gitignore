@@ -69,6 +69,7 @@ inventory.db-shm
 同事連線網址.txt
 inventory_images/
 secret_key.txt
+setup_code.txt
 backups/
 
 # Flask stuff:

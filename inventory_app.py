@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.09.05d"
+APP_VERSION = "2026.09.05e"
 
 app = Flask(__name__)
 
@@ -531,6 +531,64 @@ def lan_url(port=None):
     port = port or int(os.environ.get("PORT", 5000))
     ip = local_ip()
     return f"http://{ip}:{port}" if ip else ""
+
+
+SETUP_CODE_FILE = os.path.join(DATA_DIR, "setup_code.txt")
+
+
+def setup_code():
+    """全新系統要建立第一個管理員時必須輸入的一次性代碼。
+
+    為什麼需要:第一個註冊的人自動成為管理員,而系統是開在公司內網上的——
+    只要有人比架設者先打開那個網址,管理員就被別人拿走了。使用者實際遇到
+    「隨便打一組帳密按下去就變成管理員」,正是這個缺口。
+
+    代碼只出現在兩個地方:啟動時的黑色視窗,以及主機上與資料庫同目錄的
+    setup_code.txt。兩者都必須「人在那台電腦前面」才拿得到,所以純粹從
+    網頁端連進來的人無法建立管理員。建立完成後這個檔案就會被刪掉。
+    """
+    try:
+        if os.path.exists(SETUP_CODE_FILE):
+            with open(SETUP_CODE_FILE, encoding="utf-8") as f:
+                code = f.read().strip()
+            if code:
+                return code
+    except OSError:
+        pass
+    # 去掉容易看錯的 0/O/1/I,因為使用者要用眼睛從黑色視窗抄到瀏覽器
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    code = "".join(secrets.choice(alphabet) for _ in range(6))
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(SETUP_CODE_FILE, "w", encoding="utf-8") as f:
+            f.write(code)
+        os.chmod(SETUP_CODE_FILE, 0o600)
+    except OSError:
+        pass
+    return code
+
+
+def clear_setup_code():
+    try:
+        os.remove(SETUP_CODE_FILE)
+    except OSError:
+        pass
+
+
+def setup_code_required():
+    """從主機本機操作時不必輸入設定碼,從網路上連進來才要。
+
+    安全邊界跟 --reset-password 完全一樣:人已經坐在主機前面,就能直接讀寫
+    inventory.db,再要一組碼沒有意義。真正要擋的是「同事從自己的電腦連進來,
+    搶先建立管理員」——那種連線的來源位址不是本機,就會被要求輸入設定碼,
+    而他拿不到(碼只在主機的視窗與主機的檔案裡)。
+
+    TRUST_PROXY 開啟時代表前面有反向代理,所有連線的來源看起來都會是本機,
+    這個豁免會失效,所以那種情況一律要求設定碼。
+    """
+    if TRUST_PROXY:
+        return True
+    return (request.remote_addr or "") not in ("127.0.0.1", "::1", "localhost")
 
 
 def has_any_user():
@@ -1128,6 +1186,7 @@ LAYOUT = """
                font-size: var(--t2); border: 1px solid transparent; border-left-width: 4px; }
         .msg.error { background: var(--fault-soft); color: var(--fault-text); border-color: var(--fault); }
         .msg.ok { background: var(--onhand-soft); color: var(--onhand-text); border-color: var(--onhand); }
+        .msg.warn { background: var(--amber-soft); color: var(--amber-text); border-color: var(--amber); }
         .banner { background: var(--amber-soft); color: var(--amber-text);
                   border: 1px solid var(--amber-edge); border-left: 4px solid var(--amber);
                   padding: 11px var(--s4); border-radius: var(--r-ctl);
@@ -1776,10 +1835,28 @@ PAGE_REGISTER = """
 <p><a class="plain" href="{{ url_for('login') }}">前往登入</a></p>
 {% else %}
 <h1>建立管理員帳號</h1>
-<p class="note">這是系統的第一個帳號,將自動成為管理員(可管理帳號、刪除資料、CSV 匯入)。建立後系統即關閉自助註冊。</p>
+<div class="msg warn">
+    <b>這裡不是登入畫面。</b>這個資料庫裡目前一個帳號都沒有,所以系統帶你來建立第一個帳號,
+    而<b>第一個帳號就是管理員</b>(可以管帳號、刪資料、匯入匯出)。
+    <br><br>
+    如果你本來是要登入既有的系統、而且應該早就有帳號了,那表示<b>你開到的是一個空的資料庫</b>——
+    多半是在錯的資料夾啟動了系統。這次讀的是:<br>
+    <span class="mono">{{ db_path }}</span><br>
+    請先確認這個路徑對不對,你原本的資料還在原本那個資料夾裡,沒有不見。
+</div>
 <form method="post">
     <label>帳號</label><input type="text" name="username" value="{{ username or '' }}">
     <label>密碼(至少 8 碼)</label><input type="password" name="password">
+    {% if need_code %}
+    <label>設定碼</label>
+    <input type="text" name="setup_code" autocomplete="off" placeholder="主機黑色視窗上的 6 碼">
+    <p class="note">你是從別台電腦連進來的,所以需要設定碼。它只會出現在主機那台電腦上
+    (啟動時的黑色視窗,以及主機資料夾裡的 <span class="mono">setup_code.txt</span>)。
+    這是為了確保管理員只能由「人在主機前面」的人建立,不會被先打開網頁的同事拿走。</p>
+    {% else %}
+    <p class="note">你正在主機這台電腦上操作,不需要設定碼。
+    (從別台電腦連進來建立管理員時才會要求,以免管理員被先開網頁的人拿走。)</p>
+    {% endif %}
     <input type="submit" value="建立管理員帳號">
 </form>
 <p>已有帳號?<a class="plain" href="{{ url_for('login') }}">前往登入</a></p>
@@ -3440,8 +3517,14 @@ def register():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
+        code = request.form.get("setup_code", "").strip().upper()
         if not username or not password:
             error = "帳號與密碼不可為空"
+        elif setup_code_required() and code != setup_code():
+            # 這道檢查是唯一擋得住「同事比你先開網頁就拿走管理員」的東西。
+            # 代碼只在主機的黑色視窗與主機上的 setup_code.txt 出現。
+            error = ("設定碼不正確。請到主機那台電腦看啟動時的黑色視窗,"
+                     "上面有一組 6 碼的設定碼(也存在主機資料夾裡的 setup_code.txt)。")
         else:
             error = check_password_policy(password)
             if not error:
@@ -3449,10 +3532,13 @@ def register():
                 try:
                     create_user(username, password, is_admin=True)  # 首位即管理員
                     db.commit()
+                    clear_setup_code()
                     return redirect(url_for("login"))
                 except sqlite3.IntegrityError:
                     error = "帳號已存在,請改用其他名稱"
-    return render_page(PAGE_REGISTER, error=error, username=username, closed=False, page_title="建立管理員帳號")
+    return render_page(PAGE_REGISTER, error=error, username=username, closed=False,
+                       need_code=setup_code_required(),
+                       db_path=os.path.abspath(DB_PATH), page_title="建立管理員帳號")
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -6235,6 +6321,11 @@ def export_transactions():
 # 啟動
 # ---------------------------------------------------------------------------
 
+# init_db() 會把不存在的資料庫直接建出來,所以「本來有沒有」必須在它之前記下來。
+# 不然 --where 跑在錯的資料夾時,會先無中生有一個空 DB,再回報「這裡是空的」,
+# 剛好把使用者要找的答案蓋掉。
+DB_EXISTED_AT_START = os.path.exists(DB_PATH)
+
 init_db()
 
 def cli_setup_admin(username, password):
@@ -6255,8 +6346,53 @@ def cli_setup_admin(username, password):
             return False
         audit("建立管理員", "帳號", username, "安裝腳本建立第一個管理員")
         get_db().commit()
+        # 這條路本來就要人在主機上才跑得到,與設定碼是同一道安全邊界;
+        # 管理員既然建好了,設定碼就沒有用處,順手清掉不要留在資料夾裡。
+        clear_setup_code()
         print(f"  已建立管理員帳號:{username}")
         return True
+
+
+def cli_where():
+    """告訴使用者「這次會用到的資料到底在哪一個檔案、裡面有什麼」。
+
+    存在的理由:使用者更新版本時把新的 ZIP 解壓到另一個資料夾,在那裡啟動,
+    看到的是一個全新的空資料庫——舊資料其實好好地留在原本那個資料夾裡,
+    但畫面上完全看不出來,只會覺得「東西不見了」。"""
+    print(f"  資料庫檔案:{os.path.abspath(DB_PATH)}")
+    if not DB_EXISTED_AT_START:
+        print("    狀態:★ 這個路徑本來沒有資料庫(剛剛才建了一個空的)")
+        print("           表示你不是在原本那個資料夾裡。你的資料沒有不見,")
+        print("           在原本裝著 inventory.db 的資料夾裡。")
+    else:
+        size = os.path.getsize(DB_PATH)
+        print(f"    狀態:存在,{size:,} bytes")
+        try:
+            con = sqlite3.connect(DB_PATH)
+            for label, sql in (("帳號", "SELECT COUNT(*) FROM users"),
+                               ("商品", "SELECT COUNT(*) FROM products"),
+                               ("進出異動", "SELECT COUNT(*) FROM transactions")):
+                try:
+                    print(f"    {label}:{con.execute(sql).fetchone()[0]} 筆")
+                except sqlite3.Error:
+                    print(f"    {label}:讀不到(可能不是本系統的資料庫)")
+            con.close()
+        except sqlite3.Error as e:
+            print(f"    [注意] 打不開這個資料庫:{e}")
+    print(f"  照片資料夾:{IMAGE_DIR}")
+    print(f"  備份資料夾:{BACKUP_DIR}")
+    if os.path.isdir(BACKUP_DIR):
+        backups = sorted(f for f in os.listdir(BACKUP_DIR) if f.endswith(".db"))
+        if backups:
+            print(f"    有 {len(backups)} 份備份,最新:{backups[-1]}")
+        else:
+            print("    目前沒有備份檔")
+    else:
+        print("    備份資料夾還不存在(系統啟動過一次就會建立)")
+    print("")
+    print("  如果這裡顯示的資料筆數不是你預期的,表示你在錯的資料夾啟動了系統。")
+    print("  請找回原本那個裝著 inventory.db 的資料夾,在那裡啟動即可,資料都還在。")
+    return True
 
 
 def cli_list_users():
@@ -6349,6 +6485,8 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             sys.exit("用法:python inventory_app.py --import <商品匯入檔>")
         sys.exit(0 if cli_import(sys.argv[2]) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--where":
+        sys.exit(0 if cli_where() else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--list-users":
         sys.exit(0 if cli_list_users() else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--reset-password":
@@ -6383,11 +6521,18 @@ if __name__ == "__main__":
     # 空資料庫時 /register 是開著的,而且第一個註冊的人就是管理員。
     # 在公司內網,「開著」等於誰先打開網頁誰就拿到管理員權限——包含還不該有權限的人。
     if not has_any_user():
+        code = setup_code()
         print("")
         print("  ============================================================")
-        print("  【還沒有任何帳號】第一個註冊的人會成為管理員。")
-        print("  請你現在就先自己註冊完,再把網址給同事,否則誰先開誰就是管理員。")
-        print("  註冊完之後系統會自動關閉自助註冊,之後的帳號由你在「帳號管理」新增。")
+        print("  【還沒有任何帳號】請你現在就自己建立管理員帳號。")
+        print("")
+        print(f"        設 定 碼 : {code}")
+        print("")
+        print("  在這台電腦上直接建立(用 http://localhost 開)不必輸入設定碼;")
+        print("  從別台電腦連進來建立管理員時才會要求輸入上面這組碼。")
+        print("  它只出現在這個視窗與本機的 setup_code.txt,同事拿不到,")
+        print("  所以就算他比你先打開網址,也搶不走管理員。")
+        print("  建立完成後設定碼自動失效,之後的帳號由你在「帳號管理」新增。")
         print("  ============================================================")
         print("")
     try:
