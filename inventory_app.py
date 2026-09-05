@@ -48,7 +48,7 @@ except ImportError:
 # 版本標示:此系統以「下載 ZIP 覆蓋」的方式更新,畫面上看不出跑的是哪一版時,
 # 使用者會誤以為舊版是新版(實際發生過:舊版匯入器只讀 8 欄,靜默丟掉儲位欄)。
 # 每次發版時更新此字串,頁尾與啟動訊息都會顯示。
-APP_VERSION = "2026.09.05c"
+APP_VERSION = "2026.09.05d"
 
 app = Flask(__name__)
 
@@ -6259,6 +6259,56 @@ def cli_setup_admin(username, password):
         return True
 
 
+def cli_list_users():
+    """列出所有帳號(不含密碼——密碼是單向雜湊,存的不是原文,救不回來)。
+    忘記密碼的人往往連當初取的帳號名稱也忘了,所以先讓他看得到有哪些帳號。"""
+    with app.test_request_context():
+        rows = get_db().execute(
+            "SELECT username, is_admin, created_at FROM users ORDER BY id").fetchall()
+        if not rows:
+            print("  這個資料庫還沒有任何帳號。直接用瀏覽器開系統註冊,第一個註冊的人就是管理員。")
+            return True
+        print(f"  共 {len(rows)} 個帳號:")
+        for r in rows:
+            role = "管理員" if r["is_admin"] else "一般同事"
+            print(f"    {r['username']}    ({role},建立於 {fmt_local(r['created_at'])})")
+        print("")
+        print("  忘記密碼請用:python inventory_app.py --reset-password <帳號> <新密碼>")
+        return True
+
+
+def cli_reset_password(username, password):
+    """在伺服器本機重設某個帳號的密碼。
+
+    這是唯一的自救路徑。密碼以 werkzeug 的單向雜湊儲存,原文沒有存下來,
+    任何人都不可能「查出」舊密碼——包含系統作者。所以只能改成新的。
+
+    安全邊界是「碰得到這台電腦的檔案」:能執行這個指令的人本來就能直接
+    讀寫 inventory.db,再多加一道密碼保護沒有意義。這跟系統本來的定位
+    一致(公司內網、機器放在公司裡)。重設會寫進稽核紀錄。
+    """
+    with app.test_request_context():
+        db = get_db()
+        row = db.execute("SELECT id, username, is_admin FROM users WHERE username = ?",
+                         (username,)).fetchone()
+        if row is None:
+            print(f"  [錯誤] 找不到帳號「{username}」。目前有這些帳號:")
+            for r in db.execute("SELECT username FROM users ORDER BY id").fetchall():
+                print(f"    {r['username']}")
+            return False
+        err = check_password_policy(password)
+        if err:
+            print(f"  [錯誤] {err}")
+            return False
+        db.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+                   (generate_password_hash(password), row["id"]))
+        audit("重設密碼", "帳號", row["username"], "由伺服器本機的命令列重設")
+        db.commit()
+        role = "管理員" if row["is_admin"] else "一般同事"
+        print(f"  已重設「{row['username']}」({role})的密碼,現在可以用新密碼登入了。")
+        return True
+
+
 def cli_import(path):
     """從命令列匯入商品檔,以第一位管理員名義記錄異動。
     讓安裝腳本一次跑完轉檔→匯入,使用者不必在瀏覽器裡挑檔案挑類型。"""
@@ -6299,6 +6349,13 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             sys.exit("用法:python inventory_app.py --import <商品匯入檔>")
         sys.exit(0 if cli_import(sys.argv[2]) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--list-users":
+        sys.exit(0 if cli_list_users() else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--reset-password":
+        if len(sys.argv) < 4:
+            sys.exit("用法:python inventory_app.py --reset-password <帳號> <新密碼>\n"
+                     "     不知道有哪些帳號請先跑:python inventory_app.py --list-users")
+        sys.exit(0 if cli_reset_password(sys.argv[2], sys.argv[3]) else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--lan-url":
         # 啟動腳本用這個把「同事要輸入的那一行」抓進變數,再寫成文字檔。
         # 直接叫使用者看 ipconfig 會列出四五個位址(還包含虛擬網卡),挑不出來。

@@ -32,6 +32,7 @@ FILES = [
     ("requirements.txt",       "requirements.txt"),
     ("start_inventory.bat",    "start_inventory.bat"),
     ("start_inventory.sh",     "start_inventory.sh"),
+    ("reset_password.bat",     "reset_password.bat"),
     ("setup_all.bat",          "setup_all.bat"),
     ("migrate_data.bat",       "migrate_data.bat"),
     ("migrate_bl_excel.py",    "migrate_bl_excel.py"),
